@@ -1,0 +1,19 @@
+{
+  "name": "iron-oath",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "중세 기사 1인칭 멀티플레이 칼싸움 게임",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "three": "^0.160.0",
+    "ws": "^8.18.0",
+    "@supabase/supabase-js": "^2.45.0"
+  }
+}
