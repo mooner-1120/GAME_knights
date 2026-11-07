@@ -240,7 +240,9 @@ function strike(p, o) {
   const fz = -Math.cos(p.yaw);
   const t = now();
 
-  for (const q of players.values()) {
+  const cand = [...players.values()];
+  if (o.ranged) cand.sort((a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z));
+  for (const q of cand) {
     if (q === p || !q.alive || !isFoe(p, q)) continue;
     const dx = q.x - p.x;
     const dz = q.z - p.z;
@@ -286,6 +288,7 @@ function strike(p, o) {
       kill(p, q);
       if (match.over) return;
     }
+    if (o.ranged && !o.multi) break; // 투사체는 맨 처음 맞은 한 명에게서 멈춤
   }
 }
 
@@ -354,7 +357,7 @@ function useSkill(p, slot) {
   setTimeout(() => {
     if (!p.alive) return;
     strike(p, {
-      reach, cos, skill: id, ranged: reach > 5,
+      reach, cos, skill: id, ranged: reach > 6, multi: id === 'volley',
       dmg: def.dmg ?? c.damage * def.dmgMult * dmgMult(p),
       ignoreBlock: !!def.ignoreBlock, knock: def.knock || 0, stun: def.stun || 0,
       lifesteal: def.lifesteal || 0, selfHeal: def.selfHeal || 0,
