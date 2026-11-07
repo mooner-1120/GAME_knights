@@ -1,51 +1,85 @@
 <!doctype html>
-<html lang="ko">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>IRON OATH – 중세 기사 대전</title>
+<title>IRON OATH</title>
+<!-- 픽셀 폰트: Press Start 2P(영문 제목) · Galmuri11(한글/일본어 일부) · DotGothic16(일본어). 불러오지 못하면 시스템 글꼴로 대체됩니다 -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=DotGothic16&display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/galmuri@latest/dist/galmuri.css" rel="stylesheet">
 <style>
+  :root { --font: 'Galmuri11', 'DotGothic16', 'Noto Sans KR', 'Noto Sans JP', 'Noto Sans SC', sans-serif; --px: 'Press Start 2P', 'Galmuri11', monospace; --ac: #4db2ff; --gold: #ffd24a; }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #111; color: #eee; font-family: Georgia, 'Noto Serif KR', 'Noto Serif CJK KR', serif; user-select: none; -webkit-user-select: none; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e14; color: #fff; font-family: var(--font); user-select: none; -webkit-user-select: none; }
   #c { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
   b { font-weight: 700; }
-
-  /* ───── 공용 버튼 ───── */
   button { font: inherit; cursor: pointer; }
-  .btn { padding: 12px 40px; font-size: 19px; letter-spacing: 3px; color: #1a1308; background: linear-gradient(#f0d487, #c79a3a);
-    border: 0; border-radius: 4px; box-shadow: 0 4px 0 #6b4d12; }
-  .btn:hover { filter: brightness(1.08); }
-  .btn:active { transform: translateY(2px); box-shadow: 0 2px 0 #6b4d12; }
+  .btn { padding: 14px 28px; font: 14px var(--px); color: #111; background: var(--gold); border: 3px solid #000; box-shadow: 4px 4px 0 #000; }
+  .btn:hover { filter: brightness(1.1); }
+  .btn:active { transform: translate(2px, 2px); box-shadow: 2px 2px 0 #000; }
   .btn:disabled { filter: grayscale(.8); cursor: wait; }
-  .btn2 { padding: 10px 22px; font-size: 16px; color: #e9dcb8; background: #2a2015; border: 1px solid #6d5a33; border-radius: 4px; }
-  .btn2:hover { background: #3a2c1b; border-color: #e6c473; }
-  .btn2.danger:hover { background: #4a1d17; border-color: #e0604a; color: #ffd9d2; }
+  .btn2 { padding: 10px 16px; font: 11px var(--px); color: #fff; background: #1b2330; border: 3px solid #000; box-shadow: 3px 3px 0 #000; line-height: 1.5; }
+  .btn2:hover { background: #26324a; outline: 2px solid var(--ac); }
+  .btn2.danger:hover { background: #4a1d17; outline-color: #e0604a; }
+  select { padding: 7px 10px; font: 13px var(--font); color: #fff; background: #1b2330; border: 3px solid #000; }
 
-  /* ───── 로비 ───── */
-  #lobby { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-    background: radial-gradient(ellipse at center, rgba(30,24,18,.85), rgba(8,6,4,.97)); z-index: 10; overflow: auto; }
-  .panel { width: min(1000px, 96vw); padding: 24px; text-align: center; }
-  h1 { margin: 0; font-size: 56px; letter-spacing: 12px; color: #e6c473; text-shadow: 0 3px 0 #5a3e12, 0 0 30px rgba(230,196,115,.35); }
-  .sub { margin: 4px 0 18px; letter-spacing: 6px; color: #b5a37c; }
-  #name { width: 260px; padding: 10px 14px; font: inherit; font-size: 18px; text-align: center; color: #f1e6c8;
-    background: #1d1710; border: 1px solid #6d5a33; border-radius: 4px; outline: none; user-select: text; -webkit-user-select: text; }
-  #name:focus { border-color: #e6c473; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 18px 0; }
-  .card { padding: 14px; text-align: left; background: #1d1710; border: 2px solid #3d3220; border-radius: 6px; cursor: pointer; transition: .15s; }
-  .card:hover { border-color: #8a7343; transform: translateY(-2px); }
-  .card.sel { border-color: #e6c473; background: #2a2015; box-shadow: 0 0 18px rgba(230,196,115,.25); }
-  .card h3 { margin: 0 0 2px; font-size: 20px; }
-  .card .d { margin: 0 0 10px; font-size: 13px; color: #b5a37c; }
-  .stat { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 4px 0; color: #cdbf9b; }
-  .stat span { width: 48px; flex: none; }
-  .bar { flex: 1; height: 7px; background: #0e0b07; border-radius: 4px; overflow: hidden; }
-  .bar i { display: block; height: 100%; background: linear-gradient(90deg, #a77d1f, #e6c473); }
-  .skl { margin-top: 8px; padding-top: 7px; border-top: 1px solid #3d3220; font-size: 12px; color: #cdbf9b; line-height: 1.45; }
-  .skl b { display: inline-block; min-width: 18px; padding: 0 4px; margin-right: 4px; text-align: center; color: #1a1308; background: #e6c473; border-radius: 3px; }
-  .skl em { font-style: normal; color: #ffe9a8; }
-  #lobmsg { min-height: 22px; color: #e08a7a; margin: 12px 0 4px; }
-  .ctl { color: #8f805c; font-size: 14px; margin: 8px 0; }
-  .row { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  /* ───── 로비 (krunker 스타일: 상단 바 + 좌측 패널 + 우측 캐릭터) ───── */
+  #lobby { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; background: linear-gradient(rgba(6,10,18,.62), rgba(6,10,18,.84)); backdrop-filter: blur(2px); }
+  #lobby::before { content: ''; position: absolute; inset: 0; pointer-events: none; background: repeating-linear-gradient(0deg, rgba(255,255,255,.03) 0 2px, transparent 2px 4px); }
+  #topbar { position: relative; display: flex; align-items: center; gap: 22px; padding: 10px 22px; background: rgba(0,0,0,.6); border-bottom: 4px solid #000; flex-wrap: wrap; }
+  #logo { font: 20px var(--px); color: var(--gold); text-shadow: 3px 3px 0 #000; }
+  #nav { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; }
+  #nav button { padding: 10px 14px; font: 11px var(--px); color: #8fa3c0; background: transparent; border: 0; border-bottom: 4px solid transparent; }
+  #nav button:hover { color: #fff; }
+  #nav button.on { color: #fff; border-bottom-color: var(--ac); }
+  #topright { display: flex; align-items: center; gap: 12px; }
+  #acct { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  #acct img { width: 32px; height: 32px; border: 2px solid #000; image-rendering: pixelated; }
+  #acct small { display: block; color: #9fb0c8; font-size: 11px; }
+  #lobmain { position: relative; flex: 1; display: flex; gap: 20px; padding: 20px 24px; min-height: 0; }
+  #lcol { flex: 1; min-width: 0; overflow: auto; }
+  .tab { display: none; }
+  .tab.on { display: block; }
+  .box { background: rgba(8,12,20,.82); border: 3px solid #000; box-shadow: 0 0 0 3px rgba(255,255,255,.1), 6px 6px 0 #000; padding: 20px; }
+  #pvcol { width: min(380px, 38vw); flex: none; display: flex; flex-direction: column; overflow: auto; }
+  #lobby.wide #pvcol { display: none; }
+  #pv { width: 100%; height: 300px; display: block; background: radial-gradient(circle at 50% 75%, #2a3752, #0d121c); border: 3px solid #000; }
+  #pv-name { margin: 12px 0 2px; font: 16px var(--px); color: var(--gold); }
+  #pv-role { color: var(--ac); font-size: 13px; }
+  #pv-desc { margin: 6px 0 10px; color: #c7d2e4; font-size: 13px; }
+  #pv-skill { margin-top: 10px; font-size: 12px; line-height: 1.6; color: #dfe7f5; }
+  #pv-skill b, .skl b { display: inline-block; min-width: 18px; padding: 0 4px; margin-right: 4px; text-align: center; color: #111; background: var(--gold); }
+  #pv-skill em, .skl em { font-style: normal; color: #fff3b0; }
+  #hero { font: 40px/1.2 var(--px); color: var(--gold); text-shadow: 5px 5px 0 #000; margin: 0 0 6px; }
+  .sub { margin: 0 0 22px; color: #9fb0c8; font-size: 13px; letter-spacing: 2px; }
+  #name { width: min(360px, 100%); padding: 12px 14px; font: 16px var(--font); color: #fff; background: #0d121c; border: 3px solid #000; outline: none; user-select: text; -webkit-user-select: text; }
+  #name:focus { border-color: var(--ac); }
+  #lobmsg { min-height: 22px; margin: 14px 0 4px; color: #ff8a7a; font-size: 13px; }
+  .note { color: #8fa3c0; font-size: 12px; margin: 10px 0 0; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+  .card { padding: 12px; text-align: left; background: rgba(12,18,30,.9); border: 3px solid #000; cursor: pointer; }
+  .card:hover { outline: 2px solid #5a6c8a; }
+  .card.sel { outline: 3px solid var(--ac); background: #16223a; }
+  .card h3 { margin: 0 0 2px; font-size: 15px; color: #fff; }
+  .card .d { margin: 0 0 8px; font-size: 11px; color: #9fb0c8; min-height: 28px; }
+  .stat { display: flex; align-items: center; gap: 8px; font-size: 11px; margin: 4px 0; color: #c7d2e4; }
+  .stat span { width: 54px; flex: none; }
+  .bar { flex: 1; height: 8px; background: #05080d; border: 1px solid #000; }
+  .bar i { display: block; height: 100%; background: linear-gradient(90deg, #2a7fcf, var(--ac)); }
+  .skl { margin-top: 7px; padding-top: 6px; border-top: 1px solid #26324a; font-size: 11px; color: #c7d2e4; line-height: 1.5; }
+  table.lb { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.lb th, table.lb td { padding: 8px 10px; text-align: left; border-bottom: 2px solid #1b2330; }
+  table.lb th { color: var(--ac); font: 11px var(--px); }
+  table.lb img { width: 22px; height: 22px; vertical-align: middle; margin-right: 8px; border: 2px solid #000; }
+  #login-modal { position: fixed; inset: 0; z-index: 40; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.7); }
+  #login-modal .box { width: min(420px, 92vw); text-align: center; }
+  #login-modal h2 { margin: 0 0 8px; font: 16px var(--px); color: var(--gold); }
+  #login-providers { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
+  #login-providers .btn2 { font: 13px var(--font); padding: 12px; }
+  .ctl { color: #8fa3c0; font-size: 12px; }
 
   /* ───── HUD ───── */
   #hud { position: fixed; inset: 0; pointer-events: none; display: none; z-index: 5; }
@@ -136,6 +170,18 @@
   table.keys td:first-child { width: 42%; color: #ffe9a8; }
   kbd { display: inline-block; min-width: 26px; padding: 1px 7px; margin: 0 2px; text-align: center; font: 14px monospace; color: #1a1308; background: #e6c473; border-radius: 4px; box-shadow: 0 2px 0 #6b4d12; }
   #menu-note { min-height: 20px; margin: 4px 0 0; text-align: center; color: #e6c473; font-size: 14px; }
+
+  /* ───── 픽셀 스타일 덧입히기 ───── */
+  #banner, #death { font-family: var(--px); }
+  #banner { font-size: 28px; line-height: 1.4; }
+  #death { font-size: 30px; line-height: 1.5; }
+  .dn { font-family: var(--px); font-size: 20px; }
+  .dn.skill { font-size: 22px; }
+  #clsname { font-family: var(--px); font-size: 13px; }
+  .mpanel { background: #121a28; border: 3px solid #000; border-radius: 0; box-shadow: 0 0 0 3px rgba(255,255,255,.12), 8px 8px 0 #000; }
+  .mpanel h2 { font: 20px var(--px); letter-spacing: 1px; color: var(--gold); text-shadow: 3px 3px 0 #000; }
+  .mpanel .hint, .setrow, table.keys { font-family: var(--font); }
+  .card, .slot, #hpbar, #stbar, #board, #minimap, #toast, #feed div, #status div { border-radius: 0 !important; }
 </style>
 <script type="importmap">{ "imports": { "three": "/three/build/three.module.js" } }</script>
 </head>
@@ -165,83 +211,132 @@
   </div>
   <div id="kd"></div>
   <div id="death"></div>
-  <div id="stunned">💫 기절!</div>
+  <div id="stunned" data-i18n="stunned"></div>
   <div id="toast"></div>
-  <div id="board"><table><thead><tr><th>기사</th><th>클래스</th><th class="n">처치</th><th class="n">사망</th></tr></thead><tbody id="boardbody"></tbody></table></div>
+  <div id="board"><table><thead><tr><th data-i18n="b_name"></th><th data-i18n="b_class"></th><th class="n" data-i18n="b_kills"></th><th class="n" data-i18n="b_deaths"></th></tr></thead><tbody id="boardbody"></tbody></table></div>
 </div>
+
 
 <!-- ESC 메뉴: 포인터 잠금이 풀리면(=ESC) 자동으로 뜹니다 -->
 <div id="menu">
   <div class="mpanel">
     <div class="mview on" id="mv-main">
-      <h2>일시정지</h2>
-      <p class="hint">전투는 계속 진행 중입니다. 오래 열어 두지 마세요!</p>
+      <h2 data-i18n="paused"></h2>
+      <p class="hint" data-i18n="pausedHint"></p>
       <div class="mbtns">
-        <button class="btn" id="m-resume">전투 재개</button>
-        <button class="btn2" data-view="chars">캐릭터 선택</button>
-        <button class="btn2" data-view="settings">설정</button>
-        <button class="btn2" data-view="help">조작법 · 스킬</button>
-        <button class="btn2 danger" id="m-home">홈으로 돌아가기</button>
+        <button class="btn" id="m-resume" data-i18n="resume"></button>
+        <button class="btn2" data-view="chars" data-i18n="chooseClass"></button>
+        <button class="btn2" id="m-mode" style="display:none"></button>
+        <button class="btn2" data-view="settings" data-i18n="settings"></button>
+        <button class="btn2" data-view="help" data-i18n="controls"></button>
+        <button class="btn2 danger" id="m-home" data-i18n="home"></button>
       </div>
     </div>
 
     <div class="mview" id="mv-chars">
-      <h2>캐릭터 선택</h2>
-      <p class="hint">부활하거나 입장한 직후 8초 안에는 바로 바뀌고, 그 외에는 다음 부활 때 적용됩니다.</p>
+      <h2 data-i18n="chooseClass"></h2>
+      <p class="hint" data-i18n="charHint"></p>
       <div class="cards" id="menu-cards"></div>
       <p id="menu-note"></p>
-      <div class="back"><button class="btn2" data-view="main">뒤로</button></div>
+      <div class="back"><button class="btn2" data-view="main" data-i18n="back"></button></div>
     </div>
 
     <div class="mview" id="mv-settings">
-      <h2>설정</h2>
-      <p class="hint">설정은 이 브라우저에 자동 저장됩니다.</p>
-      <label class="setrow"><span>마우스 감도</span><input type="range" id="set-sens" min="0.3" max="3" step="0.05"><output id="o-sens"></output></label>
-      <label class="setrow"><span>시야각 (FOV)</span><input type="range" id="set-fov" min="60" max="110" step="1"><output id="o-fov"></output></label>
-      <label class="setrow"><span>효과음 볼륨</span><input type="range" id="set-vol" min="0" max="1" step="0.05"><output id="o-vol"></output></label>
-      <label class="setrow"><span>그래픽 품질</span>
-        <select id="set-quality"><option value="low">낮음 (가장 빠름)</option><option value="mid">보통</option><option value="high">높음</option></select><span></span></label>
-      <label class="setrow chk"><span>미니맵 표시</span><input type="checkbox" id="set-minimap"></label>
-      <label class="setrow chk"><span>핑 / FPS 표시</span><input type="checkbox" id="set-netinfo"></label>
-      <label class="setrow chk"><span>걸을 때 화면 흔들림</span><input type="checkbox" id="set-bob"></label>
-      <div class="back"><button class="btn2" id="set-back">뒤로</button></div>
+      <h2 data-i18n="settings"></h2>
+      <p class="hint" data-i18n="saved"></p>
+      <label class="setrow"><span data-i18n="language"></span><select id="set-lang"></select><span></span></label>
+      <label class="setrow"><span data-i18n="sens"></span><input type="range" id="set-sens" min="0.3" max="3" step="0.05"><output id="o-sens"></output></label>
+      <label class="setrow"><span data-i18n="fov"></span><input type="range" id="set-fov" min="60" max="110" step="1"><output id="o-fov"></output></label>
+      <label class="setrow"><span data-i18n="vol"></span><input type="range" id="set-vol" min="0" max="1" step="0.05"><output id="o-vol"></output></label>
+      <label class="setrow"><span data-i18n="quality"></span>
+        <select id="set-quality"><option value="low" data-i18n="q_low"></option><option value="mid" data-i18n="q_mid"></option><option value="high" data-i18n="q_high"></option></select><span></span></label>
+      <label class="setrow chk"><span data-i18n="minimap"></span><input type="checkbox" id="set-minimap"></label>
+      <label class="setrow chk"><span data-i18n="netinfo"></span><input type="checkbox" id="set-netinfo"></label>
+      <label class="setrow chk"><span data-i18n="bob"></span><input type="checkbox" id="set-bob"></label>
+      <div class="back"><button class="btn2" id="set-back" data-i18n="back"></button></div>
     </div>
 
     <div class="mview" id="mv-help">
-      <h2>조작법 · 스킬</h2>
+      <h2 data-i18n="controls"></h2>
       <p class="hint">&nbsp;</p>
       <table class="keys">
-        <tr><td><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></td><td>이동</td></tr>
-        <tr><td><kbd>Shift</kbd></td><td>달리기 (스태미나 소모, 방어 중엔 불가)</td></tr>
-        <tr><td><kbd>Space</kbd></td><td>점프</td></tr>
-        <tr><td>마우스 좌클릭</td><td>공격</td></tr>
-        <tr><td>마우스 우클릭 / <kbd>F</kbd> (누르고 있기)</td><td>방어 (받는 피해 감소, 이동 느려짐)</td></tr>
-        <tr><td><kbd>Q</kbd></td><td>기사별 고유 스킬</td></tr>
-        <tr><td><kbd>E</kbd></td><td>발차기 — 방어를 무시하고 밀쳐내며 잠깐 기절시킴</td></tr>
-        <tr><td><kbd>Tab</kbd></td><td>점수판</td></tr>
-        <tr><td><kbd>Esc</kbd></td><td>이 메뉴</td></tr>
+        <tr><td><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></td><td data-i18n="k_move"></td></tr>
+        <tr><td><kbd>Shift</kbd></td><td data-i18n="k_sprint"></td></tr>
+        <tr><td><kbd>Space</kbd></td><td data-i18n="k_jump"></td></tr>
+        <tr><td><kbd>LMB</kbd></td><td data-i18n="k_attack"></td></tr>
+        <tr><td><kbd>RMB</kbd> / <kbd>F</kbd></td><td data-i18n="k_block"></td></tr>
+        <tr><td><kbd>Q</kbd></td><td data-i18n="k_skill"></td></tr>
+        <tr><td><kbd>E</kbd></td><td data-i18n="k_kick"></td></tr>
+        <tr><td><kbd>Enter</kbd> / <kbd>T</kbd></td><td data-i18n="k_chat"></td></tr>
+        <tr><td><kbd>V</kbd></td><td data-i18n="k_emote"></td></tr>
+        <tr><td><kbd>Tab</kbd></td><td data-i18n="k_score"></td></tr>
+        <tr><td><kbd>Esc</kbd></td><td data-i18n="k_menu"></td></tr>
       </table>
       <div class="skl" id="help-skills"></div>
-      <div class="back"><button class="btn2" data-view="main">뒤로</button></div>
+      <div class="back"><button class="btn2" data-view="main" data-i18n="back"></button></div>
     </div>
   </div>
 </div>
 
 <div id="lobby">
-  <div class="panel">
-    <h1>IRON OATH</h1>
-    <div class="sub">철 의 맹 세 — 기사 대전</div>
-    <input id="name" maxlength="16" placeholder="기사 이름" autocomplete="off">
-    <div class="cards" id="cards"></div>
-    <div class="row">
-      <button class="btn" id="join">전장으로 입장</button>
-      <button class="btn2" id="lobby-settings">⚙ 설정</button>
+  <div id="topbar">
+    <div id="logo">IRON OATH</div>
+    <div id="nav">
+      <button class="on" data-tab="play" data-i18n="nav_play"></button>
+      <button data-tab="class" data-i18n="nav_class"></button>
+      <button data-tab="ranks" data-i18n="nav_ranks"></button>
+      <button data-tab="settings" data-i18n="nav_settings"></button>
     </div>
-    <p id="lobmsg"></p>
-    <p class="ctl">WASD 이동 · Shift 달리기 · 좌클릭 공격 · 우클릭/F 방어 · Q 스킬 · E 발차기 · Tab 점수판 · Esc 메뉴</p>
+    <div id="topright">
+      <select id="lang" aria-label="Language"></select>
+      <div id="acct"></div>
+    </div>
+  </div>
+
+  <div id="lobmain">
+    <div id="lcol">
+      <section class="tab on box" id="tab-play">
+        <h1 id="hero">IRON OATH</h1>
+        <p class="sub" data-i18n="subtitle"></p>
+        <input id="name" maxlength="16" data-i18n-ph="name" autocomplete="off">
+        <div class="row" style="margin-top:18px">
+          <button class="btn" id="join" data-i18n="play"></button>
+        </div>
+        <p id="lobmsg"></p>
+        <p class="note" data-i18n="mode_note"></p>
+        <p class="note" data-i18n="tip"></p>
+      </section>
+      <section class="tab" id="tab-class">
+        <div class="cards" id="cards"></div>
+      </section>
+      <section class="tab box" id="tab-ranks">
+        <h2 style="margin:0 0 12px;font:15px var(--px);color:var(--gold)" data-i18n="leaderboard"></h2>
+        <table class="lb"><thead><tr><th>#</th><th data-i18n="b_name"></th><th data-i18n="b_kills"></th><th data-i18n="b_deaths"></th><th>W</th></tr></thead><tbody id="lbbody"></tbody></table>
+        <p class="note" id="lbempty"></p>
+      </section>
+      <button id="lobby-settings" style="display:none"></button>
+    </div>
+    <aside id="pvcol" class="box">
+      <canvas id="pv"></canvas>
+      <div id="pv-name"></div>
+      <div id="pv-role"></div>
+      <div id="pv-desc"></div>
+      <div id="pv-stats"></div>
+      <div id="pv-skill"></div>
+    </aside>
   </div>
 </div>
 
+<div id="login-modal">
+  <div class="box">
+    <h2 data-i18n="signin"></h2>
+    <p class="note" data-i18n="login_why"></p>
+    <div id="login-providers"></div>
+    <button class="btn2" id="login-close" data-i18n="back"></button>
+  </div>
+</div>
+
+<script type="module" src="/auth.js"></script>
 <script type="module" src="/game.js"></script>
 </body>
 </html>

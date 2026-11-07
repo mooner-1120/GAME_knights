@@ -3,6 +3,7 @@
 
 import * as THREE from 'three';
 import { CLASSES, SKILLS, ARENA, PLAYER, TEAMS, EMOTES, resolveCollision } from '/classes.js';
+import { t, cname, cdesc, crole, sname, sdesc, setLang, getLang, onLang, applyI18n, LANGS } from './i18n.js';
 
 const $ = (id) => document.getElementById(id);
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -911,8 +912,8 @@ function volFor(id, base) {
 
 /* ═════════════ UI: 캐릭터 카드 ═════════════ */
 const STATS = [
-  ['체력', (c) => c.hp / 150], ['속도', (c) => c.speed / 6.5], ['공격력', (c) => c.damage / 40],
-  ['공속', (c) => 1 / c.cooldown / 2.7], ['사거리', (c) => Math.min(1, c.reach / (c.ranged ? 20 : 5))], ['방어', (c) => c.block],
+  ['s_hp', (c) => c.hp / 150], ['s_speed', (c) => c.speed / 6.5], ['s_dmg', (c) => c.damage / 40],
+  ['s_rate', (c) => 1 / c.cooldown / 2.7], ['s_range', (c) => Math.min(1, c.reach / (c.ranged ? 20 : 5))], ['s_def', (c) => c.block],
 ];
 function buildCards(container, selectedId, onPick) {
   container.textContent = '';
@@ -921,11 +922,11 @@ function buildCards(container, selectedId, onPick) {
     const el = document.createElement('div');
     el.className = 'card' + (c.id === selectedId ? ' sel' : '');
     el.innerHTML = '<h3></h3><p class="d"></p>'
-      + STATS.map(([n, f]) => `<div class="stat"><span>${n}</span><div class="bar"><i style="width:${Math.round(clamp(f(c), 0.05, 1) * 100)}%"></i></div></div>`).join('')
-      + `<div class="skl"><b>Q</b> ${sk.icon} <em>${sk.name}</em> — ${sk.desc} (${sk.cooldown}초)</div>`
-      + `<div class="skl" style="border:0;margin:0;padding:0"><b>E</b> 🦶 <em>발차기</em> (쿨타임 없음)</div>`;
-    el.querySelector('h3').textContent = `${c.name} · ${c.role}`;
-    el.querySelector('.d').textContent = c.desc;
+      + STATS.map(([n, f]) => `<div class="stat"><span>${t(n)}</span><div class="bar"><i style="width:${Math.round(clamp(f(c), 0.05, 1) * 100)}%"></i></div></div>`).join('')
+      + `<div class="skl"><b>Q</b> ${sk.icon} <em>${sname(sk)}</em> (${t('secs', { n: sk.cooldown })})</div>`
+      + `<div class="skl" style="border:0;margin:0;padding:0"><b>E</b> 🦶 <em>${sname(SKILLS.kick)}</em> (${t('nocd')})</div>`;
+    el.querySelector('h3').textContent = `${cname(c)} · ${crole(c)}`;
+    el.querySelector('.d').textContent = cdesc(c);
     el.onclick = () => {
       container.querySelectorAll('.card').forEach((x) => x.classList.remove('sel'));
       el.classList.add('sel');
@@ -934,12 +935,16 @@ function buildCards(container, selectedId, onPick) {
     container.appendChild(el);
   }
 }
-buildCards($('cards'), selectedCls, (id) => (selectedCls = id));
+const pickLobby = (id) => { selectedCls = id; setPreviewClass(id); };
+buildCards($('cards'), selectedCls, pickLobby);
 $('name').value = (() => { try { return localStorage.getItem('ironoath_name') || ''; } catch { return ''; } })();
-$('help-skills').innerHTML = Object.values(CLASSES).map((c) => {
-  const sk = SKILLS[c.skill];
-  return `<div style="margin:6px 0"><b>Q</b> ${sk.icon} <em>${sk.name}</em> <span style="opacity:.7">(${c.name})</span> — ${sk.desc}</div>`;
-}).join('') + `<div style="margin:6px 0"><b>E</b> 🦶 <em>${SKILLS.kick.name}</em> — ${SKILLS.kick.desc}</div>`;
+function renderHelp() {
+  $('help-skills').innerHTML = Object.values(CLASSES).map((c) => {
+    const sk = SKILLS[c.skill];
+    return `<div style="margin:6px 0"><b>Q</b> ${sk.icon} <em>${sname(sk)}</em> <span style="opacity:.7">(${cname(c)})</span> — ${sdesc(sk)}</div>`;
+  }).join('') + `<div style="margin:6px 0"><b>E</b> 🦶 <em>${sname(SKILLS.kick)}</em> — ${sdesc(SKILLS.kick)}</div>`;
+}
+renderHelp();
 
 /* ═════════════ HUD 보조 ═════════════ */
 let toastTimer = 0;
@@ -977,7 +982,7 @@ function dmgNumber(x, y, z, text, cls) {
 }
 function updateHud() {
   const c = CLASSES[me.cls];
-  $('clsname').textContent = c.name;
+  $('clsname').textContent = cname(c);
   $('hpfill').style.width = `${clamp((me.hp / c.hp) * 100, 0, 100)}%`;
   $('hptext').textContent = `${Math.ceil(me.hp)} / ${c.hp}`;
   $('lowhp').classList.toggle('on', me.alive && me.hp / c.hp < 0.3);
@@ -990,7 +995,7 @@ function renderBoard() {
     const tr = document.createElement('tr');
     if (r.id === me.id) tr.className = 'me';
     if (matchInfo.mode === 'tdm' && TEAM_CSS[r.team]) tr.style.color = TEAM_CSS[r.team];
-    for (const [txt, cls] of [[r.name, ''], [CLASSES[r.cls]?.name ?? r.cls, ''], [r.kills, 'n'], [r.deaths, 'n']]) {
+    for (const [txt, cls] of [[r.name, ''], [CLASSES[r.cls] ? cname(CLASSES[r.cls]) : r.cls, ''], [r.kills, 'n'], [r.deaths, 'n']]) {
       const td = document.createElement('td');
       td.textContent = txt;
       if (cls) td.className = cls;
@@ -999,7 +1004,7 @@ function renderBoard() {
     body.appendChild(tr);
   }
   const mine = roster.find((r) => r.id === me.id);
-  $('kd').textContent = mine ? `처치 ${mine.kills}  /  사망 ${mine.deaths}` : '';
+  $('kd').textContent = mine ? t('kd', { k: mine.kills, d: mine.deaths }) : '';
   updateMatchHud();
 }
 const nameOf = (id) => roster.find((r) => r.id === id)?.name ?? '???';
@@ -1014,7 +1019,7 @@ function updateHudFrame(nowMs, dt) {
   for (const s of slotEls) {
     const id = s.k === 'q' ? CLASSES[me.cls].skill : 'kick';
     const def = SKILLS[id];
-    if (s.id !== id) { s.id = id; s.ic.textContent = def.icon; s.nm.textContent = def.name; }
+    if (s.id !== id) { s.id = id; s.ic.textContent = def.icon; s.nm.textContent = sname(def); }
     const cdMs = def.cooldown * 1000 || PLAYER.kickGapMs;
     const rem = Math.max(0, (me.cd[id] || 0) - nowMs);
     const key = rem <= 0 ? 'r' : `${Math.round((rem / cdMs) * 100)}|${(rem / 1000).toFixed(rem < 10000 ? 1 : 0)}`;
@@ -1033,17 +1038,17 @@ function updateHudFrame(nowMs, dt) {
     hudTick = 0;
     const st = $('status');
     const items = [];
-    if (nowMs < me.buffUntil) items.push(`✨ 강화 ${((me.buffUntil - nowMs) / 1000).toFixed(1)}초`);
-    if (nowMs < me.counterUntil) items.push('⚔ 반격 가능!');
-    if (nowMs < me.stunUntil) items.push('💫 기절');
-    if (me.exhausted) items.push('😮‍💨 지침');
+    if (nowMs < me.buffUntil) items.push(t('st_buff', { s: ((me.buffUntil - nowMs) / 1000).toFixed(1) }));
+    if (nowMs < me.counterUntil) items.push(t('st_counter'));
+    if (nowMs < me.stunUntil) items.push(t('st_stun'));
+    if (me.exhausted) items.push(t('st_tired'));
     if (st.dataset.k !== items.join('|')) {
       st.dataset.k = items.join('|');
       st.textContent = '';
       for (const t of items) { const d = document.createElement('div'); d.textContent = t; st.appendChild(d); }
     }
     $('stunned').style.display = nowMs < me.stunUntil && me.alive ? 'block' : 'none';
-    if (S.netinfo) $('netinfo').textContent = `핑 ${me.ping}ms · ${fps} FPS`;
+    if (S.netinfo) $('netinfo').textContent = t('ping', { p: me.ping, f: fps });
   }
 }
 
@@ -1097,7 +1102,7 @@ function connect() {
   const name = $('name').value.trim() || 'Knight';
   try { localStorage.setItem('ironoath_name', name); } catch {}
   $('join').disabled = true;
-  $('lobmsg').textContent = '접속 중…';
+  $('lobmsg').textContent = t('connecting');
   const sock = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
   ws = sock;
   sock.onopen = () => send({ t: 'join', name, cls: selectedCls, token: window.ironToken || null });
@@ -1107,7 +1112,7 @@ function connect() {
     if (ws !== sock) return; // 우리가 직접 나간 경우
     ws = null;
     const wasJoined = joined;
-    goLobby(wasJoined ? '서버와 연결이 끊어졌습니다.' : '서버에 연결하지 못했습니다. (서버가 잠들어 있다면 잠시 후 다시 시도해 보세요)');
+    goLobby(wasJoined ? t('dropped') : t('failconn'));
   };
 }
 $('join').onclick = () => {
@@ -1151,7 +1156,7 @@ function resetLocal() {
 function handle(m) {
   switch (m.t) {
     case 'full':
-      $('lobmsg').textContent = '서버가 가득 찼습니다.';
+      $('lobmsg').textContent = t('full');
       $('join').disabled = false;
       ws?.close();
       ws = null;
@@ -1236,7 +1241,7 @@ function handle(m) {
         h.className = m.blocked ? 'blocked' : '';
         h.style.opacity = 1;
         setTimeout(() => (h.style.opacity = 0), 150);
-        if (pos) dmgNumber(pos.x, pos.y + 2.1, pos.z, (m.tag === 'counter' ? '반격 ' : m.tag === 'back' ? '암습 ' : '') + m.dmg, m.blocked ? 'blocked' : m.skill || m.tag ? 'skill' : '');
+        if (pos) dmgNumber(pos.x, pos.y + 2.1, pos.z, (m.tag === 'counter' ? t('counter_tag') : m.tag === 'back' ? t('back_tag') : '') + m.dmg, m.blocked ? 'blocked' : m.skill || m.tag ? 'skill' : '');
       }
       m.blocked ? clang(volFor(m.id, 0.35)) : thud(volFor(m.id, 0.5));
       break;
@@ -1245,7 +1250,7 @@ function handle(m) {
       feed(`${nameOf(m.killer)}  ⚔  ${nameOf(m.victim)}`);
       if (m.killer === me.id) {
         me.streak++;
-        banner(['', '처치!', '더블 킬!', '트리플 킬!', '쿼드라 킬!'][me.streak] || `${me.streak}연속 처치!`);
+        banner(me.streak >= 1 && me.streak <= 4 ? t('streak' + me.streak) : me.streak > 4 ? t('streakn', { n: me.streak }) : '');
       }
       if (m.victim === me.id) {
         me.alive = false;
@@ -1277,7 +1282,7 @@ function handle(m) {
       me.dash = null;
       break;
     case 'authrequired':
-      $('lobmsg').textContent = '이 서버는 로그인이 필요합니다.';
+      $('lobmsg').textContent = t('needlogin');
       $('join').disabled = false;
       ws?.close();
       ws = null;
@@ -1294,8 +1299,8 @@ function handle(m) {
       const pos = actorPos(m.id);
       if (pos) { ring(pos.x, pos.z, 0xfff2a0, 3, 0.35); burst(pos.x, pos.y + 1.3, pos.z, 0xffe27a, 14); }
       clang(volFor(m.id, 0.6));
-      if (m.id === me.id) { me.counterUntil = performance.now() + PLAYER.counterWindowMs; banner('패링!'); me.shake = Math.max(me.shake, 0.5); }
-      if (m.by === me.id) banner('패링당했다!');
+      if (m.id === me.id) { me.counterUntil = performance.now() + PLAYER.counterWindowMs; banner(t('parry')); me.shake = Math.max(me.shake, 0.5); }
+      if (m.by === me.id) banner(t('parried'));
       break;
     }
     case 'heal': {
@@ -1314,8 +1319,8 @@ function handle(m) {
     }
     case 'classqueued':
       me.pendingCls = m.immediate ? null : m.cls;
-      $('menu-note').textContent = m.immediate ? `${CLASSES[m.cls].name}(으)로 변경했습니다!` : `${CLASSES[m.cls].name} — 다음 부활 때 적용됩니다.`;
-      if (!m.immediate) toast(`다음 부활 때 ${CLASSES[m.cls].name}(으)로 변경`);
+      $('menu-note').textContent = t(m.immediate ? 'cls_now' : 'cls_next', { c: cname(CLASSES[m.cls]) });
+      if (!m.immediate) toast(t('cls_next', { c: cname(CLASSES[m.cls]) }));
       buildCards($('menu-cards'), me.pendingCls || me.cls, pickClass);
       break;
   }
@@ -1350,7 +1355,7 @@ function refreshMenu() {
 function tryLock() {
   try {
     const p = canvas.requestPointerLock();
-    if (p && p.catch) p.catch(() => toast('잠시 후 다시 클릭해 주세요'));
+    if (p && p.catch) p.catch(() => toast(t('lockfail')));
   } catch {}
 }
 function resetInput() {
@@ -1360,7 +1365,7 @@ function resetInput() {
 }
 function pickClass(id) {
   if (!joined) return;
-  if (id === me.cls && !me.pendingCls) { $('menu-note').textContent = '이미 선택한 기사입니다.'; return; }
+  if (id === me.cls && !me.pendingCls) { $('menu-note').textContent = t('cls_same'); return; }
   send({ t: 'setclass', cls: id });
 }
 document.addEventListener('pointerlockchange', () => {
@@ -1372,7 +1377,7 @@ document.addEventListener('pointerlockchange', () => {
   }
   refreshMenu();
 });
-document.addEventListener('pointerlockerror', () => toast('마우스 잠금에 실패했어요. 한 번 더 클릭해 주세요'));
+document.addEventListener('pointerlockerror', () => toast(t('lockfail2')));
 
 document.querySelectorAll('[data-view]').forEach((b) => (b.onclick = () => showView(b.dataset.view)));
 $('m-resume').onclick = () => tryLock();
@@ -1526,25 +1531,25 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '
   const st = document.createElement('style');
   st.textContent = `
   #x-match{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:20;display:none;pointer-events:none;text-align:center;
-    background:rgba(15,12,8,.72);border:2px solid #6b5a3a;padding:6px 18px;color:#f3e7c4;font:bold 20px Georgia,'Noto Serif KR',serif;text-shadow:0 2px 0 #000}
+    background:rgba(15,12,8,.72);border:2px solid #6b5a3a;padding:6px 18px;color:#f3e7c4;font:bold 20px var(--font);text-shadow:0 2px 0 #000}
   #x-match small{display:block;font-size:12px;opacity:.75;font-weight:normal}
   #x-chatlog{position:fixed;left:14px;bottom:200px;width:360px;max-height:170px;overflow:hidden;z-index:20;pointer-events:none;
-    font:14px/1.35 'Noto Sans KR',sans-serif;color:#fff;text-shadow:0 1px 2px #000}
+    font:14px/1.35 var(--font);color:#fff;text-shadow:0 1px 2px #000}
   #x-chatlog div{background:rgba(0,0,0,.38);padding:2px 8px;margin-top:2px;word-break:break-all}
-  #x-chatin{position:fixed;left:14px;bottom:170px;width:360px;z-index:30;display:none;box-sizing:border-box;padding:6px 10px;font:14px 'Noto Sans KR',sans-serif;
+  #x-chatin{position:fixed;left:14px;bottom:170px;width:360px;z-index:30;display:none;box-sizing:border-box;padding:6px 10px;font:14px var(--font);
     background:rgba(0,0,0,.75);border:2px solid #c9a24a;color:#fff;outline:none}
   #x-emotes{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:25;display:none;background:rgba(15,12,8,.82);border:2px solid #c9a24a;
-    padding:12px 18px;color:#f3e7c4;font:16px 'Noto Sans KR',sans-serif;display:none;columns:2;column-gap:28px}
+    padding:12px 18px;color:#f3e7c4;font:16px var(--font);display:none;columns:2;column-gap:28px}
   #x-emotes div{margin:4px 0}#x-emotes b{color:#ffd45a}
-  #x-end{position:fixed;inset:0;z-index:26;display:none;background:rgba(0,0,0,.55);color:#f3e7c4;font-family:Georgia,'Noto Serif KR',serif;text-align:center;padding-top:12vh}
+  #x-end{position:fixed;inset:0;z-index:26;display:none;background:rgba(0,0,0,.55);color:#f3e7c4;font-family:var(--font);text-align:center;padding-top:12vh}
   #x-end h1{font-size:46px;margin:0 0 6px;text-shadow:0 3px 0 #000}
-  #x-end table{margin:18px auto;border-collapse:collapse;font:16px 'Noto Sans KR',sans-serif;min-width:360px}
+  #x-end table{margin:18px auto;border-collapse:collapse;font:16px var(--font);min-width:360px}
   #x-end td,#x-end th{padding:4px 14px;border-bottom:1px solid #5a4a2a}`;
   document.head.appendChild(st);
   const mk = (id) => { const d = document.createElement('div'); d.id = id; document.body.appendChild(d); return d; };
   mk('x-match'); mk('x-chatlog'); mk('x-end');
   const em = mk('x-emotes');
-  em.innerHTML = EMOTES.map((e, i) => `<div><b>${i + 1}</b> ${e.icon} ${esc(e.name)}</div>`).join('');
+  renderEmotes();
   const inp = document.createElement('input');
   inp.id = 'x-chatin'; inp.maxLength = 120; inp.autocomplete = 'off';
   document.body.appendChild(inp);
@@ -1563,27 +1568,27 @@ function updateMatchHud() {
   if (!joined) { el.style.display = 'none'; return; }
   el.style.display = 'block';
   if (matchInfo.mode === 'tdm') {
-    const mine = me.team ? `내 팀: <span style="color:${TEAM_CSS[me.team]}">${esc(TEAMS[me.team].name)}</span> · ` : '';
-    el.innerHTML = `<span style="color:${TEAM_CSS[1]}">${esc(TEAMS[1].name)} ${matchInfo.teamScore[1]}</span> <b>:</b> <span style="color:${TEAM_CSS[2]}">${matchInfo.teamScore[2]} ${esc(TEAMS[2].name)}</span><small>${mine}먼저 ${matchInfo.limit}킬 승리</small>`;
+    const mine = me.team ? `${esc(t('m_myteam'))}: <span style="color:${TEAM_CSS[me.team]}">${esc(t('team_' + me.team))}</span> · ` : '';
+    el.innerHTML = `<span style="color:${TEAM_CSS[1]}">${esc(t('team_1'))} ${matchInfo.teamScore[1]}</span> <b>:</b> <span style="color:${TEAM_CSS[2]}">${matchInfo.teamScore[2]} ${esc(t('team_2'))}</span><small>${mine}${esc(t('m_tdm', { n: matchInfo.limit }))}</small>`;
   } else {
     const top = [...roster].sort((a, b) => b.kills - a.kills)[0];
-    el.innerHTML = `개인전 · 먼저 ${matchInfo.limit}킬<small>선두: ${top ? esc(top.name) + ' ' + top.kills + '킬' : '-'}</small>`;
+    el.innerHTML = `${esc(t('m_ffa', { n: matchInfo.limit }))}<small>${top ? esc(t('m_lead', { n: top.name, k: top.kills })) : ''}</small>`;
   }
 }
 
 function showMatchEnd(m) {
   const el = $('x-end');
-  const title = m.mode === 'tdm' ? `${esc(TEAMS[m.winnerTeam]?.name ?? '')} 팀 승리!` : `${esc(nameOf(m.winnerId))} 승리!`;
+  const title = esc(m.mode === 'tdm' ? t('win_team', { t: t('team_' + m.winnerTeam) }) : t('win_player', { n: nameOf(m.winnerId) }));
   const mineWon = m.mode === 'tdm' ? m.winnerTeam === me.team : m.winnerId === me.id;
-  const rows = m.board.slice(0, 8).map((r) => `<tr style="color:${m.mode === 'tdm' ? TEAM_CSS[r.team] : '#f3e7c4'}"><td>${esc(r.name)}</td><td>${esc(CLASSES[r.cls]?.name ?? r.cls)}</td><td>${r.kills}</td><td>${r.deaths}</td></tr>`).join('');
-  el.innerHTML = `<h1>${title}</h1><div>${mineWon ? '🏆 승리!' : '패배'}</div><table><tr><th>이름</th><th>직업</th><th>처치</th><th>사망</th></tr>${rows}</table><div id="x-endcd"></div>`;
+  const rows = m.board.slice(0, 8).map((r) => `<tr style="color:${m.mode === 'tdm' ? TEAM_CSS[r.team] : '#f3e7c4'}"><td>${esc(r.name)}</td><td>${esc(CLASSES[r.cls] ? cname(CLASSES[r.cls]) : r.cls)}</td><td>${r.kills}</td><td>${r.deaths}</td></tr>`).join('');
+  el.innerHTML = `<h1>${title}</h1><div>${esc(mineWon ? t('victory') : t('defeat'))}</div><table><tr><th>${esc(t('b_name'))}</th><th>${esc(t('b_class'))}</th><th>${esc(t('b_kills'))}</th><th>${esc(t('b_deaths'))}</th></tr>${rows}</table><div id="x-endcd"></div>`;
   el.style.display = 'block';
   const until = performance.now() + m.nextMs;
   clearInterval(endTimer);
   endTimer = setInterval(() => {
     const left = Math.max(0, Math.ceil((until - performance.now()) / 1000));
     const cd = $('x-endcd');
-    if (cd) cd.textContent = `${left}초 뒤 새 판이 시작됩니다`;
+    if (cd) cd.textContent = t('nextmatch', { s: left });
   }, 250);
 }
 
@@ -1609,7 +1614,7 @@ function addChat(m) {
   const log = $('x-chatlog');
   const d = document.createElement('div');
   const col = matchInfo.mode === 'tdm' && TEAM_CSS[m.team] ? TEAM_CSS[m.team] : '#ffe9a8';
-  d.innerHTML = `${m.teamOnly ? '<b style="color:#8fe08f">[팀]</b> ' : ''}<b style="color:${col}">${esc(m.name)}</b>: ${esc(m.text)}`;
+  d.innerHTML = `${m.teamOnly ? '<b style="color:#8fe08f">' + esc(t('tag_team')) + '</b> ' : ''}<b style="color:${col}">${esc(m.name)}</b>: ${esc(m.text)}`;
   log.appendChild(d);
   setTimeout(() => d.remove(), 12000);
   while (log.children.length > 7) log.firstChild.remove();
@@ -1622,7 +1627,7 @@ function openChat(team) {
   chatOpen = true;
   const inp = $('x-chatin');
   inp.value = '';
-  inp.placeholder = chatTeam ? '팀 채팅 (Enter 전송 / Esc 취소)' : '전체 채팅 (Enter 전송 / Esc 취소)';
+  inp.placeholder = chatTeam ? t('chatTeam') : t('chatAll');
   inp.style.display = 'block';
   document.exitPointerLock?.();
   setTimeout(() => inp.focus(), 30);
@@ -1647,7 +1652,7 @@ function sendEmote(i) {
   const e = EMOTES[i];
   if (!e) return;
   send({ t: 'emote', e: e.id });
-  toast(`${e.icon} ${e.name}`);
+  toast(`${e.icon} ${t('em_' + e.id)}`);
 }
 
 // 원거리 투사체 (화살 / 마법탄): 판정은 서버가 하고, 여기는 눈에 보이는 연출
@@ -1699,6 +1704,105 @@ function updateShots(dt) {
     }
   }
 }
+
+/* ═════════════ 로비: 3D 캐릭터 미리보기 / 탭 / 언어 / 방장 모드 ═════════════ */
+function renderEmotes() {
+  const box = $('x-emotes');
+  if (box) box.innerHTML = EMOTES.map((e, i) => `<div><b>${i + 1}</b> ${e.icon} ${esc(t('em_' + e.id))}</div>`).join('');
+}
+let pv = null;
+function initPreview() {
+  const cv = $('pv');
+  if (!cv) return;
+  const rend = new THREE.WebGLRenderer({ canvas: cv, antialias: false, alpha: true });
+  rend.setPixelRatio(1);
+  const sc = new THREE.Scene();
+  sc.add(new THREE.AmbientLight(0xffffff, 0.95));
+  const dl = new THREE.DirectionalLight(0xffffff, 1.1);
+  dl.position.set(3, 5, 4);
+  sc.add(dl);
+  const cam = new THREE.PerspectiveCamera(32, 1, 0.1, 50);
+  cam.position.set(0, 1.15, 4.4);
+  cam.lookAt(0, 0.95, 0);
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 0.9, 0.08, 20), new THREE.MeshLambertMaterial({ color: 0x2a3550 }));
+  base.position.y = -0.04;
+  sc.add(base);
+  pv = { rend, sc, cam, rig: null, next: 1.2 };
+}
+function setPreviewClass(id) {
+  if (!pv) return;
+  if (pv.rig) pv.sc.remove(pv.rig.root);
+  const rig = makeRig(id, '', 0);
+  scene.remove(rig.root); // makeRig 는 게임 장면에 넣어 버리므로 미리보기 장면으로 옮김
+  rig.label.visible = false;
+  rig.cls = id;
+  rig.root.rotation.y = 0.5;
+  pv.sc.add(rig.root);
+  pv.rig = rig;
+  pv.next = 1.0;
+  updatePreviewInfo();
+}
+function updatePreviewInfo() {
+  const c = CLASSES[selectedCls];
+  if (!c || !$('pv-name')) return;
+  const sk = SKILLS[c.skill];
+  $('pv-name').textContent = cname(c);
+  $('pv-role').textContent = crole(c);
+  $('pv-desc').textContent = cdesc(c);
+  $('pv-stats').innerHTML = STATS.map(([n, f]) => `<div class="stat"><span>${esc(t(n))}</span><div class="bar"><i style="width:${Math.round(clamp(f(c), 0.05, 1) * 100)}%"></i></div></div>`).join('');
+  $('pv-skill').innerHTML = `<b>Q</b> ${sk.icon} <em>${esc(sname(sk))}</em> — ${esc(sdesc(sk))} (${esc(t('secs', { n: sk.cooldown }))})<br><b>E</b> 🦶 <em>${esc(sname(SKILLS.kick))}</em> (${esc(t('nocd'))})`;
+}
+function renderPreview(dt) {
+  if (!pv || $('lobby').style.display === 'none') return;
+  const cv = pv.rend.domElement;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!w || !h) return;
+  if (cv.width !== w || cv.height !== h) { pv.rend.setSize(w, h, false); pv.cam.aspect = w / h; pv.cam.updateProjectionMatrix(); }
+  const r = pv.rig;
+  if (r) {
+    pv.next -= dt;
+    r.root.rotation.y += dt * 0.7;
+    if (pv.next <= 0) { startAct(r, 'swing'); pv.next = 2.4; } // 2.4초마다 공격 동작 시연
+    animateRig(r, dt, { v: 0, air: false, sprint: false, blocking: false, pitch: 0, onStep() {} });
+  }
+  pv.rend.render(pv.sc, pv.cam);
+}
+
+document.querySelectorAll('[data-tab]').forEach((b) => {
+  b.onclick = () => {
+    if (b.dataset.tab === 'settings') { $('lobby-settings').click(); return; }
+    document.querySelectorAll('[data-tab]').forEach((x) => x.classList.toggle('on', x === b));
+    document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('on', x.id === 'tab-' + b.dataset.tab));
+    $('lobby').classList.toggle('wide', b.dataset.tab === 'ranks');
+  };
+});
+for (const id of ['lang', 'set-lang']) {
+  const s = $(id);
+  if (!s) continue;
+  s.innerHTML = LANGS.map((l) => `<option value="${l.code}">${l.label}</option>`).join('');
+  s.value = getLang();
+  s.onchange = () => setLang(s.value);
+}
+onLang(() => {
+  for (const id of ['lang', 'set-lang']) if ($(id)) $(id).value = getLang();
+  buildCards($('cards'), selectedCls, pickLobby);
+  renderHelp();
+  updatePreviewInfo();
+  renderEmotes();
+  updateMatchHud();
+});
+function updateModeBtn() {
+  const b = $('m-mode');
+  if (!b) return;
+  const host = joined && me.id != null && matchInfo.hostId === me.id;
+  b.style.display = host ? '' : 'none';
+  if (host) b.textContent = `${t('host_mode')} → ${t(matchInfo.mode === 'tdm' ? 'mode_ffa' : 'mode_tdm')}`;
+}
+setInterval(updateModeBtn, 500);
+$('m-mode').onclick = () => send({ t: 'setmode', mode: matchInfo.mode === 'tdm' ? 'ffa' : 'tdm' });
+applyI18n();
+initPreview();
+setPreviewClass(selectedCls);
 
 /* ═════════════ 메인 루프 ═════════════ */
 const clock = new THREE.Clock();
@@ -1835,8 +1939,8 @@ function update(dt, nowMs) {
     if (S.minimap && mmTick === 0) drawMinimap();
     if (dead) {
       const left = Math.max(0, Math.ceil((deadUntil - nowMs) / 1000));
-      $('death').innerHTML = '전사했습니다<small></small>';
-      $('death').querySelector('small').textContent = `${killerName}에게 쓰러졌습니다 · ${left}초 후 부활`;
+      $('death').innerHTML = esc(t('died')) + '<small></small>';
+      $('death').querySelector('small').textContent = t('killedBy', { n: killerName, s: left });
     }
   }
 }
@@ -1849,7 +1953,10 @@ function frame(now) {
   fpsAcc += dt; fpsN++;
   if (fpsAcc >= 0.5) { fps = Math.round(fpsN / fpsAcc); fpsAcc = 0; fpsN = 0; }
   update(dt, performance.now());
+  camera.children.forEach((o) => { o.visible = joined; });
+  if (!joined) { const a = now / 9000; camera.position.set(Math.cos(a) * 64, 26, Math.sin(a) * 64); camera.lookAt(0, 3, 0); }
   renderer.render(scene, camera);
+  renderPreview(dt);
 }
 
 applyQuality();
