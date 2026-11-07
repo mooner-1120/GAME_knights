@@ -2,7 +2,7 @@
 // 구성: 설정 → 렌더러/월드 → 블록형 기사 모델·애니메이션 → 1인칭 → 사운드 → 네트워크 → 메뉴/HUD → 입력 → 메인 루프
 
 import * as THREE from 'three';
-import { CLASSES, SKILLS, ARENA, PLAYER, TEAMS, EMOTES, resolveCollision } from '/classes.js';
+import { CLASSES, SKILLS, ARENA, PLAYER, TEAMS, EMOTES, resolveCollision, lineBlocked } from '/classes.js';
 import { t, cname, cdesc, crole, sname, sdesc, setLang, getLang, onLang, applyI18n, LANGS } from './i18n.js';
 
 const $ = (id) => document.getElementById(id);
@@ -385,23 +385,29 @@ function makeWeapon(W, c, L) {
   }
   return g;
 }
-// 활/석궁: 손잡이가 원점, 사선(앞)이 -Y, 시위가 +Y, 활 몸통은 X축 방향
+// 활/석궁: 손잡이가 원점. 활은 몸통이 Z축(세로), 앞(표적 쪽)이 -Y, 시위가 +Y. 석궁은 개머리판이 Y축, 활대가 X축.
+// userData.stat = 시위/화살처럼 "당기지 않았을 때만" 보이는 정지 부품 (당기는 동안은 시위·화살이 양손을 따라 움직임)
 function makeBow(W, L) {
   const g = new THREE.Group();
   const wood = lam(0x6b4a2a), dark = lam(0x3b2a1a), steel = lam(0xdfe5ec), str = lam(0xeeeeee);
-  const add = (geo, mat, x, y, z, rz = 0) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.rotation.z = rz; m.castShadow = true; g.add(m); return m; };
+  const add = (geo, mat, x, y, z, rx = 0) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.rotation.x = rx; m.castShadow = true; g.add(m); return m; };
+  g.userData.stat = [];
   if (W === 'crossbow') {
-    add(BOX(0.07, 0.75, 0.08), dark, 0, -0.1, 0);
-    add(BOX(0.8, 0.05, 0.05), wood, 0, -0.38, 0);
-    add(BOX(0.78, 0.012, 0.012), str, 0, -0.3, 0);
-    add(BOX(0.016, 0.55, 0.016), steel, 0, -0.15, 0.05);
+    add(BOX(0.07, 0.85, 0.09), dark, 0, -0.125, 0);          // 개머리판
+    add(BOX(0.05, 0.14, 0.05), dark, 0, 0.1, -0.09);          // 방아쇠 손잡이
+    add(BOX(0.86, 0.05, 0.05), wood, 0, -0.5, 0);             // 활대
+    add(BOX(0.1, 0.05, 0.05), wood, 0.45, -0.46, 0);
+    add(BOX(0.1, 0.05, 0.05), wood, -0.45, -0.46, 0);
+    add(BOX(0.84, 0.012, 0.012), str, 0, -0.36, 0.03);       // 시위
+    add(BOX(0.018, 0.62, 0.018), steel, 0, -0.2, 0.06);      // 장전된 볼트
   } else {
-    add(BOX(0.16, 0.05, 0.06), dark, 0, 0, 0);
-    add(BOX(0.52, 0.04, 0.045), wood, 0.28, -0.07, 0, -0.32);
-    add(BOX(0.52, 0.04, 0.045), wood, -0.28, -0.07, 0, 0.32);
-    add(BOX(1.0, 0.012, 0.012), str, 0, 0.12, 0);
-    add(BOX(0.014, 0.9, 0.014), wood, 0, -0.12, 0);
-    add(BOX(0.04, 0.1, 0.02), steel, 0, -0.58, 0);
+    add(BOX(0.05, 0.07, 0.18), dark, 0, 0, 0);                // 손잡이
+    add(BOX(0.045, 0.04, 0.54), wood, 0, 0.129, 0.327, -0.5); // 위쪽 활대: 끝이 궁수(+Y) 쪽으로 휘어 D자 모양
+    add(BOX(0.045, 0.04, 0.54), wood, 0, 0.129, -0.327, 0.5); // 아래쪽 활대
+    add(BOX(0.06, 0.05, 0.05), wood, 0, 0.26, 0.58, 0); add(BOX(0.06, 0.05, 0.05), wood, 0, 0.26, -0.58, 0); // 시위가 걸리는 끝
+    g.userData.stat.push(add(BOX(0.012, 0.012, 1.13), str, 0, 0.26, 0)); // 시위
+    g.userData.stat.push(add(BOX(0.016, 0.9, 0.016), wood, 0, -0.19, 0)); // 화살대
+    g.userData.stat.push(add(BOX(0.045, 0.1, 0.02), steel, 0, -0.62, 0)); // 화살촉
   }
   return g;
 }
@@ -494,12 +500,23 @@ function makeRig(clsId, name, team = 0) {
   sword.position.set(0, -0.62, 0);
   sword.rotation.x = -Math.PI / 2;
   armR.add(sword);
-  let bowPivot = null;
+  let bowPivot = null, bowModel = null, bowFx = null;
   if (isBowCls(clsId)) {
     bowPivot = new THREE.Group();
     bowPivot.position.set(0, -0.62, 0);
-    bowPivot.add(makeBow(W, L));
+    bowModel = makeBow(W, L);
+    bowPivot.add(bowModel);
     armL.add(bowPivot);
+    if (W === 'bow') { // 당기는 동안 양손을 따라 움직이는 시위 2줄 + 화살
+      bowFx = new THREE.Group();
+      bowFx.visible = false;
+      for (const [n, th, col] of [['s1', 0.012, 0xeeeeee], ['s2', 0.012, 0xeeeeee], ['ar', 0.018, 0xd8c8a0]]) {
+        const m = new THREE.Mesh(BOX(th, th, 1), lam(col));
+        bowFx[n] = m;
+        bowFx.add(m);
+      }
+      upper.add(bowFx);
+    }
   }
   if (team && TEAMS[team]) add(BOX(0.34, 0.55, 0.03), lam(TEAMS[team].color), 0, 0.3, 0.14, upper); // 팀 색 망토
 
@@ -519,7 +536,7 @@ function makeRig(clsId, name, team = 0) {
   }
   root.add(stars);
   scene.add(root);
-  return { root, upper, head, armR, armL, legR, legL, sword, shield, label, stars, bowPivot, team, bubble: null, combo: 0, phase: 0, stepIdx: 0, block: 0, fall: 0, act: null, spinT: 0 };
+  return { root, upper, head, armR, armL, legR, legL, sword, shield, label, stars, bowPivot, bowModel, bowFx, xbow: W === 'crossbow', spear: W === 'spear', team, bubble: null, combo: 0, phase: 0, stepIdx: 0, block: 0, fall: 0, act: null, spinT: 0 };
 }
 function removeRig(r) {
   scene.remove(r.root);
@@ -541,12 +558,18 @@ const CAST = {
   raised: { arm: 2.5, wr: 0.2,  tw: -0.25, ln: 0.12,  st: -0.2, al: 2.3, rz: 0.2 },
   end:    { arm: 1.5, wr: -1.5, tw: 0.3,   ln: -0.25, st: 0.4,  al: 1.5, rz: -0.1 },
 };
+// 창: 양손으로 잡고 낮게 자세를 잡았다가(뒤로 젖힘) 앞으로 내지르는 찌르기
+const SPEAR = {
+  idle:   { arm: 0.85, wr: 0.5,  tw: 0,    ln: -0.04, st: 0,    al: 0, rz: -0.5 },
+  raised: { arm: 1.1,  wr: -1.0, tw: -0.4, ln: 0.1,   st: -0.3, al: 0, rz: -0.5 },
+  end:    { arm: 1.55, wr: -1.55, tw: 0.35, ln: -0.3, st: 0.7,  al: 0, rz: -0.4 },
+};
 const drawAmt = (u, uh) => (u < uh ? easeOut(u / uh) : 1 - easeInOut(Math.min(1, (u - uh) / Math.max(0.15, (1 - uh) * 0.8))));
 // 활: 옆으로 선 자세(왼쪽 어깨가 표적), 왼팔 쭉 뻗고 오른팔로 시위를 끝까지 당김 → 릴리즈
 function drawPose(u, uh, crossbow) {
   const d = drawAmt(u, uh);
-  const tw = (crossbow ? -0.45 : -1.25) * d;
-  return { tw, hy: -tw * 0.5, ln: -0.04, st: 0, wr: 0.5, arm: lerp(0.85, crossbow ? 1.5 : 0.45, d), rz: lerp(0.06, crossbow ? 0.1 : 1.25, d), al: lerp(1.0, crossbow ? 1.5 : 0.15, d), lz: lerp(-0.3, crossbow ? -0.1 : -1.5, d), bw: crossbow ? 1 : d };
+  const tw = (crossbow ? -0.25 : -1.45) * d; // 활: 옆으로 서서 왼쪽 어깨가 표적, 석궁: 거의 정면
+  return { tw, hy: -tw * 0.5, ln: -0.04, st: 0, wr: 0.5, al: lerp(1.0, 1.57, d), lz: lerp(-0.3, crossbow ? 0.4 : -1.19, d), bw: d };
 }
 function castPose(u, uh) {
   const a = Math.min(uh * 0.6, 0.4);
@@ -596,9 +619,9 @@ function actionPose(a, c) {
     if (isBowCls(c.id)) return drawPose(u, c.windup / a.dur, weaponOf(c.id) === 'crossbow');
     const k = swingKeys(a.t, c);
     if (!k) return null;
-    const T = c.ranged ? CAST : P3;
+    const T = c.ranged ? CAST : weaponOf(c.id) === 'spear' ? SPEAR : P3;
     const p = mixP(T[k[0]], T[k[1]], k[2]);
-    if (a.mirror && !c.ranged) { p.tw = -p.tw; p.rz = -p.rz; p.al = -p.al * 0.5; }
+    if (a.mirror && !c.ranged && weaponOf(c.id) !== 'spear') { p.tw = -p.tw; p.rz = -p.rz; p.al = -p.al * 0.5; }
     return p;
   }
   if (RANGED_SK[a.id]) {
@@ -620,6 +643,21 @@ function startAct(r, kind, id) {
   r.act = { kind, id, t: 0, dur: kind === 'emote' ? 2.2 : kind === 'swing' ? swingParams(c).total : skillDur(id), free: !!SKILL_FREE[id] || kind === 'emote', mirror: kind === 'swing' && ((r.combo ^= 1) === 1) };
 }
 
+// 어깨에서 (dx,dy,dz) 방향을 가리키는 팔 각도 (팔은 아래(-Y)로 늘어진 상태가 기준, x축 회전 a, z축 회전 c)
+function solveArm(dx, dy, dz) {
+  const l = Math.hypot(dx, dy, dz) || 1;
+  dx /= l; dy /= l; dz /= l;
+  return { c: Math.asin(clamp(dx, -1, 1)), a: Math.atan2(-dz, -dy) };
+}
+const _seg = new THREE.Vector3();
+const _Zaxis = new THREE.Vector3(0, 0, 1);
+function seg(m, a, b) { // 길이 1짜리 가는 막대를 두 점 사이에 맞춰 늘림
+  const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+  const len = Math.hypot(dx, dy, dz) || 1e-4;
+  m.position.set((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
+  m.scale.z = len;
+  m.quaternion.setFromUnitVectors(_Zaxis, _seg.set(dx / len, dy / len, dz / len));
+}
 function animateRig(r, dt, o) {
   const c = CLASSES[r.cls];
   r.phase += o.v * dt * 2.4 * (o.sprint ? 0.85 : 1);
@@ -632,6 +670,7 @@ function animateRig(r, dt, o) {
   let ln = o.sprint ? -0.3 : o.v > 0.5 ? -0.07 : -0.04;
   let spin = 0, hx = 0, sp = 0, rz = 0.06, lz = -0.06, bw = 0, hy = 0;
   if (r.bowPivot) { armL = 1.0; lz = -0.3; }
+  if (r.spear) rz = -0.5;
 
   r.block = lerp(r.block, o.blocking ? 1 : 0, Math.min(1, dt * 14));
   const b = r.block;
@@ -659,13 +698,51 @@ function animateRig(r, dt, o) {
     if (P.lz !== undefined) lz = P.lz;
   }
 
+  // ── 두 손 처리 ──
+  const SH = 0.3375, SY = 0.675;
+  if (r.bowPivot) {
+    // 활/석궁: 왼손이 무기를 쥐고, 오른손은 시위(활) / 방아쇠 쪽(석궁)을 잡는다
+    const xb = r.xbow;
+    const delta = (xb ? -lz : -Math.PI / 2 - lz) * bw; // 활이 표적 방향(활: 몸 옆선, 석궁: 정면)을 가리키게 회전
+    r.bowPivot.rotation.set(0, 0, delta);
+    if (bw > 0.02) {
+      const c2 = lz + delta, ca = Math.cos(armL), sa = Math.sin(armL);
+      const f = { x: Math.sin(c2), y: -Math.cos(c2) * ca, z: -Math.cos(c2) * sa };               // 무기가 향하는 방향
+      const G = { x: -SH + 0.62 * Math.sin(lz), y: SY - 0.62 * Math.cos(lz) * ca, z: -0.62 * Math.cos(lz) * sa }; // 왼손 위치
+      const dd = xb ? 0.3 : lerp(0.26, 0.75, bw);                                                   // 오른손이 왼손에서 뒤로 물러난 거리
+      const N = { x: G.x - f.x * dd, y: G.y - f.y * dd - (xb ? 0.04 : 0), z: G.z - f.z * dd };
+      const sv = solveArm(N.x - SH, N.y - SY, N.z);
+      const wgt = Math.min(1, bw * 2);
+      armR = lerp(armR, sv.a, wgt);
+      rz = lerp(rz, sv.c, wgt);
+      if (r.bowFx) {
+        const uv = { y: -sa, z: ca }; // 활이 서 있는 방향(세로)
+        const tip = (s) => ({ x: G.x - f.x * 0.26, y: G.y - f.y * 0.26 + s * 0.58 * uv.y, z: G.z - f.z * 0.26 + s * 0.58 * uv.z });
+        seg(r.bowFx.s1, tip(1), N);
+        seg(r.bowFx.s2, tip(-1), N);
+        seg(r.bowFx.ar, N, { x: G.x + f.x * 0.5, y: G.y + f.y * 0.5, z: G.z + f.z * 0.5 });
+      }
+    }
+    if (r.bowFx) r.bowFx.visible = bw > 0.02;
+    for (const m of r.bowModel.userData.stat) m.visible = bw <= 0.02;
+  }
+  if (r.spear) {
+    // 창: 오른손 자루 위치에서 창이 향한 방향으로 조금 앞을 왼손이 받쳐 잡는다
+    const sa = Math.sin(armR), ca = Math.cos(armR), sr = Math.sin(rz), cr = Math.cos(rz);
+    const H = { x: SH + 0.62 * sr, y: SY - 0.62 * cr * ca, z: -0.62 * cr * sa };
+    const wx = -sr * Math.sin(wr), wy = cr * Math.sin(wr), wz = -Math.cos(wr);
+    const w = { x: wx, y: wy * ca - wz * sa, z: wy * sa + wz * ca };
+    const sv = solveArm(H.x + w.x * 0.38 + SH, H.y + w.y * 0.38 - SY, H.z + w.z * 0.38);
+    armL = sv.a;
+    lz = sv.c;
+  }
+
   r.legR.rotation.x = legR;
   r.legL.rotation.x = legL;
   r.upper.rotation.set(ln, tw + spin, 0);
   r.upper.position.y = 0.675 + (o.air ? 0 : Math.abs(Math.cos(r.phase)) * 0.02 * amp);
   r.armR.rotation.set(armR, 0, rz);
   r.armL.rotation.set(armL, 0, lz);
-  if (r.bowPivot) r.bowPivot.rotation.y = lerp(Math.PI / 2, 0, bw);
   r.sword.rotation.x = -Math.PI / 2 + wr;
   r.head.rotation.set(clamp(o.pitch, -1.2, 1.2) * 0.8 - ln * 0.5 + hx, -tw * 0.5 + hy, 0);
   if (r.shield) {
@@ -777,9 +854,9 @@ function buildViewmodel() {
   let bowG = null;
   if (isB) {
     bowG = makeBow(W, L);
-    bowG.quaternion.setFromAxisAngle(new THREE.Vector3(1, 1, 1).normalize(), TAU / 3);
+    if (W === 'crossbow') { bowG.quaternion.setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2); bowG.position.set(-0.06, -0.3, -0.6); }
+    else { bowG.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 1).normalize(), Math.PI); bowG.position.set(-0.2, -0.3, -0.7); }
     bowG.scale.setScalar(0.75);
-    bowG.position.set(-0.2, -0.3, -0.7);
     bowG.traverse((o) => { o.castShadow = false; });
     vm.add(bowG);
   }
@@ -913,7 +990,7 @@ function volFor(id, base) {
 /* ═════════════ UI: 캐릭터 카드 ═════════════ */
 const STATS = [
   ['s_hp', (c) => c.hp / 150], ['s_speed', (c) => c.speed / 6.5], ['s_dmg', (c) => c.damage / 40],
-  ['s_rate', (c) => 1 / c.cooldown / 2.7], ['s_range', (c) => Math.min(1, c.reach / (c.ranged ? 20 : 5))], ['s_def', (c) => c.block],
+  ['s_rate', (c) => 1 / c.cooldown / 2.7], ['s_range', (c) => Math.min(1, c.reach / (c.ranged ? 36 : 5))], ['s_def', (c) => c.block],
 ];
 function buildCards(container, selectedId, onPick) {
   container.textContent = '';
@@ -1686,14 +1763,35 @@ function spawnShot(id, clsId, skillId) {
     mesh.position.set(x + dir.x * 0.7, eyeY + dir.y * 0.7, z + dir.z * 0.7);
     if (arrow) mesh.lookAt(mesh.position.clone().add(dir));
     scene.add(mesh);
-    shots.push({ m: mesh, dir, left: reach, arrow, color });
+    shots.push({ m: mesh, dir, left: rayStop(mesh.position.x, mesh.position.z, dir, reach, id), arrow, color });
   }
   whoosh(volFor(id, 0.2), 3500);
+}
+// 투사체가 날아갈 거리: 사거리 끝까지. 건물·기둥에 막히거나 처음 만나는 사람이 있으면 거기서 멈춤
+function rayStop(sx, sz, dir, reach, shooterId) {
+  const hl = Math.hypot(dir.x, dir.z) || 1, hx = dir.x / hl, hz = dir.z / hl;
+  let max = reach;
+  if (lineBlocked(sx, sz, sx + hx * max, sz + hz * max)) {
+    let lo = 0, hi = max;
+    for (let i = 0; i < 12; i++) {
+      const mid = (lo + hi) / 2;
+      if (lineBlocked(sx, sz, sx + hx * mid, sz + hz * mid)) hi = mid; else lo = mid;
+    }
+    max = lo;
+  }
+  const hit = (px, pz) => {
+    const vx = px - sx, vz = pz - sz, t = vx * hx + vz * hz;
+    if (t < 0 || t > max) return;
+    if (Math.hypot(vx - hx * t, vz - hz * t) < 0.75) max = t;
+  };
+  if (me.alive && shooterId !== me.id) hit(me.x, me.z);
+  for (const r of remotes.values()) if (r.alive && r.id !== shooterId) hit(r.root.position.x, r.root.position.z);
+  return max / hl; // 위아래로 쏴도 수평 사거리만큼 날아가게 보정
 }
 function updateShots(dt) {
   for (let i = shots.length - 1; i >= 0; i--) {
     const s = shots[i];
-    const d = Math.min(s.left, 60 * dt);
+    const d = Math.min(s.left, 90 * dt);
     s.m.position.addScaledVector(s.dir, d);
     s.left -= d;
     if (!s.arrow) { s.m.rotation.z += dt * 10; s.m.rotation.x += dt * 7; }
