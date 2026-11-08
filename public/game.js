@@ -116,7 +116,7 @@ const BOX = (w, h, d) => {
 
 /* ═════════════ 월드 (맵마다 다시 만들 수 있음) ═════════════ */
 const THEMES = {
-  town:      { grass: ['#5b9a3a', '#3f7a2a'], stone: ['#8a8780', TH.stone[1]], dirt: '#7f6647', dirtR: 15, streets: true, sky: ['#86b4e6', '#9cc2ee'] },
+  town:      { grass: ['#5b9a3a', '#3f7a2a'], stone: ['#8a8780', '#5d5b56'], dirt: '#7f6647', dirtR: 15, streets: true, sky: ['#86b4e6', '#9cc2ee'] },
   fortress:  { grass: ['#5a8a45', '#3f6a2f'], stone: ['#7a7a82', '#4d4d55'], dirt: '#6f5a40', dirtR: 0, courtyard: 36, sky: ['#9aa9bd', '#b4bfcc'] },
   forest:    { grass: ['#3f7d2e', '#2c5f1f'], stone: ['#7d8077', '#555850'], dirt: '#6a5238', dirtR: 9, sky: ['#8fbf9a', '#a9d0a8'] },
   colosseum: { grass: ['#d7c08a', '#b89f66'], stone: ['#c9b27a', '#9c8855'], dirt: '#d2b97c', dirtR: 34, sky: ['#f0b87a', '#f5cf9e'] },
