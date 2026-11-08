@@ -13,7 +13,7 @@ import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import {
   CLASSES, SKILLS, MAPS, PLAYER, MATCH, ROOM, CHAT, EMOTES, EMOTE_GAP_MS,
-  resolveCollision, lineBlocked,
+  PROJ, resolveCollision, lineBlocked, projBlocked,
 } from './classes.js';
 import { dbEnabled, verifyUser, recordMatch } from './db.js';
 
@@ -100,6 +100,7 @@ const dmgMult = (p) => (p.buffUntil > now() ? p.buffDmg : 1);
 const rooms = new Map();
 let nextRoomId = 1;
 let nextId = 1;
+let nextProj = 1;
 
 class Room {
   constructor({ name, custom, max, mode, mapId, password }) {
@@ -115,6 +116,7 @@ class Room {
     this.over = false;
     this.vote = null;
     this.timers = new Set();
+    this.projs = [];
     this.setMap(mapId);
     this.endsAt = now() + MATCH.durationMs;
   }
@@ -177,6 +179,7 @@ class Room {
     this.teamScore = { 1: 0, 2: 0 };
     this.over = false;
     this.vote = null;
+    this.projs = [];
     this.endsAt = now() + MATCH.durationMs;
     for (const p of this.players.values()) {
       p.kills = 0; p.deaths = 0;
@@ -196,6 +199,7 @@ class Room {
   endMatch(winnerPlayer, winnerTeam, draw) {
     if (this.over) return;
     this.over = true;
+    this.projs = [];
     const board = this.roster().sort((a, b) => b.kills - a.kills);
     const nextMs = this.custom ? MATCH.customRestartMs : MATCH.voteMs + MATCH.resultMs;
     this.broadcast({
@@ -299,17 +303,14 @@ function kill(p, q) {
   }
 }
 
-// o: { reach, cos, dmg, skill, ignoreBlock, knock, stun, lifesteal, selfHeal, counter, ranged, multi }
+// o: { reach, cos, dmg, skill, ignoreBlock, knock, stun, lifesteal, selfHeal, counter, ranged, multi, proj }
+// 근접은 즉시 판정, 원거리(화살·마법탄)는 launch()로 실제 투사체를 날립니다.
 function strike(p, o) {
   const rm = p.room;
   if (!rm || !p.alive || rm.over) return;
-  const c = CLASSES[p.cls];
+  if (o.ranged) return launch(p, o);
   const fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);
-  const t = now();
-  const cand = [...rm.players.values()];
-  if (o.ranged) cand.sort((a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z));
-
-  for (const q of cand) {
+  for (const q of rm.players.values()) {
     if (q === p || !q.alive || !rm.isFoe(p, q)) continue;
     const dx = q.x - p.x, dz = q.z - p.z;
     const dist = Math.hypot(dx, dz);
@@ -317,43 +318,110 @@ function strike(p, o) {
     if (Math.abs(q.y - p.y) > 1.8) continue;
     if (o.cos > -1 && dist > 0.6 && (dx * fx + dz * fz) / dist < o.cos) continue;
     if (lineBlocked(p.x, p.z, q.x, q.z, rm.map)) continue;
-
-    const qc = CLASSES[q.cls];
-    const tfx = -Math.sin(q.yaw), tfz = -Math.cos(q.yaw);
-    const facing = dist > 0.01 ? (tfx * -dx + tfz * -dz) / dist : 1;
-    const guarding = !o.ignoreBlock && q.blocking && facing > 0.3;
-
-    // 패링: 방어를 막 올린 순간(parryMs 이내) 근접 공격을 받으면 피해 0, 공격자 기절, 반격 기회
-    if (guarding && !o.ranged && t - q.blockSince <= PLAYER.parryMs) {
-      q.counterUntil = t + PLAYER.counterWindowMs;
-      rm.broadcast({ t: 'parry', id: q.id, by: p.id });
-      stun(p, PLAYER.parryStunMs);
-      continue;
-    }
-
-    let mult = 1, tag = null;
-    if (o.counter) { mult *= PLAYER.counterMult; tag = 'counter'; }
-    if (c.backstab && dist > 0.01 && (tfx * dx + tfz * dz) / dist > 0.5) { mult *= c.backstab; tag = 'back'; }
-    const dmg = Math.max(1, Math.round(o.dmg * mult * (guarding ? 1 - qc.block : 1)));
-
-    q.hp = Math.max(0, q.hp - dmg);
-    rm.broadcast({ t: 'hit', id: q.id, by: p.id, dmg, hp: q.hp, blocked: guarding, skill: o.skill || null, tag });
-    if (o.lifesteal) heal(p, dmg * o.lifesteal);
-    if (o.selfHeal) heal(p, o.selfHeal);
-
-    if (q.hp > 0) {
-      if (o.knock) {
-        const nx = dist > 0.01 ? dx / dist : fx, nz = dist > 0.01 ? dz / dist : fz;
-        push(q, nx, nz, o.knock * (guarding ? 0.4 : 1));
-      }
-      if (o.stun && !guarding) stun(q, o.stun);
-    } else {
-      kill(p, q);
-      if (rm.over) return;
-    }
-    if (o.ranged && !o.multi) break; // 투사체는 맨 처음 맞은 한 명에게서 멈춤
+    applyHit(p, q, o, dx, dz, dist);
+    if (rm.over) return;
   }
 }
+
+// 맞은 한 명에 대한 처리 (패링, 방어, 피해, 흡혈, 밀치기, 기절, 처치)
+function applyHit(p, q, o, dx, dz, dist) {
+  const rm = p.room;
+  const c = CLASSES[p.cls], qc = CLASSES[q.cls];
+  const fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);
+  const t = now();
+  const tfx = -Math.sin(q.yaw), tfz = -Math.cos(q.yaw);
+  const facing = dist > 0.01 ? (tfx * -dx + tfz * -dz) / dist : 1;
+  const guarding = !o.ignoreBlock && q.blocking && facing > 0.3;
+
+  // 패링: 방어를 막 올린 순간(parryMs 이내) 근접 공격을 받으면 피해 0, 공격자 기절, 반격 기회
+  if (guarding && !o.ranged && t - q.blockSince <= PLAYER.parryMs) {
+    q.counterUntil = t + PLAYER.counterWindowMs;
+    rm.broadcast({ t: 'parry', id: q.id, by: p.id });
+    stun(p, PLAYER.parryStunMs);
+    return;
+  }
+  let mult = 1, tag = null;
+  if (o.counter) { mult *= PLAYER.counterMult; tag = 'counter'; }
+  if (c.backstab && dist > 0.01 && (tfx * dx + tfz * dz) / dist > 0.5) { mult *= c.backstab; tag = 'back'; }
+  const dmg = Math.max(1, Math.round(o.dmg * mult * (guarding ? 1 - qc.block : 1)));
+
+  q.hp = Math.max(0, q.hp - dmg);
+  rm.broadcast({ t: 'hit', id: q.id, by: p.id, dmg, hp: q.hp, blocked: guarding, skill: o.skill || null, tag });
+  if (o.lifesteal) heal(p, dmg * o.lifesteal);
+  if (o.selfHeal) heal(p, o.selfHeal);
+
+  if (q.hp > 0) {
+    if (o.knock) {
+      const nx = dist > 0.01 ? dx / dist : fx, nz = dist > 0.01 ? dz / dist : fz;
+      push(q, nx, nz, o.knock * (guarding ? 0.4 : 1));
+    }
+    if (o.stun && !guarding) stun(q, o.stun);
+  } else {
+    kill(p, q);
+  }
+}
+
+// 투사체 발사: 시선 방향(위아래 포함)으로 날아가며, 사거리(flat)까지는 직선, 그 뒤로는 중력 포물선
+function launch(p, o) {
+  const rm = p.room;
+  const cfg = PROJ[o.proj] || PROJ.arrow;
+  const n = o.multi ? 5 : 1;
+  const cp = Math.cos(p.pitch), sp = Math.sin(p.pitch);
+  for (let i = 0; i < n; i++) {
+    const a = p.yaw + (n > 1 ? (i / (n - 1) - 0.5) * 0.42 : 0);
+    const dx = -Math.sin(a) * cp, dy = sp, dz = -Math.cos(a) * cp;
+    const s = {
+      pid: nextProj++, owner: p, o, trav: 0, flat: o.reach, max: o.reach * cfg.ext, g: cfg.grav,
+      x: p.x + dx * 0.7, y: p.y + 1.45 + dy * 0.7, z: p.z + dz * 0.7,
+      vx: dx * cfg.speed, vy: dy * cfg.speed, vz: dz * cfg.speed,
+    };
+    rm.projs.push(s);
+    rm.broadcast({
+      t: 'proj', pid: s.pid, by: p.id, cls: p.cls, kind: o.proj || 'arrow', skill: o.skill || null, first: i === 0,
+      x: +s.x.toFixed(2), y: +s.y.toFixed(2), z: +s.z.toFixed(2), vx: +s.vx.toFixed(2), vy: +s.vy.toFixed(2), vz: +s.vz.toFixed(2),
+      flat: s.flat, max: s.max, g: s.g,
+    });
+  }
+}
+
+Room.prototype.stepProjs = function stepProjs(h) {
+  if (!this.projs.length) return;
+  const dead = new Set();
+  for (const s of [...this.projs]) {
+    if (this.over) break;
+    if (!this.players.has(s.owner.id)) { dead.add(s); this.broadcast({ t: 'projend', pid: s.pid, x: s.x, y: s.y, z: s.z, hit: false }); continue; }
+    let end = null;
+    const speed = Math.hypot(s.vx, s.vy, s.vz);
+    const n = Math.max(1, Math.ceil((speed * h) / 0.8)), dt = h / n;
+    for (let k = 0; k < n && !end; k++) {
+      const ox = s.x, oy = s.y, oz = s.z;
+      const sp = Math.hypot(s.vx, s.vy, s.vz);
+      if (s.trav >= s.flat) s.vy -= s.g * dt; // 사거리 너머부터 낙하
+      s.x += s.vx * dt; s.y += s.vy * dt; s.z += s.vz * dt;
+      s.trav += sp * dt;
+      if (s.y <= 0) { end = 'ground'; break; }
+      if (projBlocked(ox, oy, oz, s.x, s.y, s.z, this.map)) { end = 'wall'; break; }
+      const sx = s.x - ox, sz = s.z - oz, L2 = sx * sx + sz * sz;
+      for (const q of this.players.values()) {
+        if (q === s.owner || !q.alive || !this.isFoe(s.owner, q)) continue;
+        const t = L2 > 0 ? clamp(((q.x - ox) * sx + (q.z - oz) * sz) / L2, 0, 1) : 0;
+        if (Math.hypot(ox + sx * t - q.x, oz + sz * t - q.z) > PLAYER.radius + 0.3) continue;
+        const yy = oy + (s.y - oy) * t;
+        if (yy < q.y - 0.1 || yy > q.y + 1.95) continue;
+        const dx = q.x - s.owner.x, dz = q.z - s.owner.z;
+        end = 'hit';
+        applyHit(s.owner, q, s.o, dx, dz, Math.hypot(dx, dz));
+        break;
+      }
+      if (!end && s.trav >= s.max) end = 'range';
+    }
+    if (end) {
+      dead.add(s);
+      this.broadcast({ t: 'projend', pid: s.pid, x: +s.x.toFixed(2), y: +s.y.toFixed(2), z: +s.z.toFixed(2), hit: end === 'hit' });
+    }
+  }
+  if (dead.size) this.projs = this.projs.filter((s) => !dead.has(s));
+};
 
 function respawn(rm, id, force = false) {
   const q = rm.players.get(id);
@@ -412,7 +480,7 @@ function useSkill(p, slot) {
   rm.later(() => {
     if (!p.alive) return;
     strike(p, {
-      reach, cos, skill: id, ranged: reach > 6, multi: id === 'volley',
+      reach, cos, skill: id, ranged: reach > 6, proj: def.proj, multi: id === 'volley',
       dmg: def.dmg ?? c.damage * def.dmgMult * dmgMult(p),
       ignoreBlock: !!def.ignoreBlock, knock: def.knock || 0, stun: def.stun || 0,
       lifesteal: def.lifesteal || 0, selfHeal: def.selfHeal || 0,
@@ -529,7 +597,7 @@ wss.on('connection', (ws) => {
       rm.later(() => {
         const counter = p.counterUntil > now();
         if (counter) p.counterUntil = 0;
-        strike(p, { reach: c.reach, cos, ranged: !!c.ranged, counter, ignoreBlock: counter, dmg: Math.round(c.damage * dmgMult(p)) });
+        strike(p, { reach: c.reach, cos, ranged: !!c.ranged, proj: c.proj, counter, ignoreBlock: counter, dmg: Math.round(c.damage * dmgMult(p)) });
       }, c.windup * 1000);
     } else if (m.t === 'skill') {
       if (!p.alive || isStunned(p) || rm.over) return;
@@ -581,6 +649,8 @@ wss.on('connection', (ws) => {
 });
 
 /* ───────────── 주기 작업 ───────────── */
+setInterval(() => { for (const rm of rooms.values()) rm.stepProjs(0.025); }, 25); // 투사체 비행 계산 (40Hz)
+
 setInterval(() => { // 20Hz 스냅샷
   for (const rm of rooms.values()) {
     if (!rm.players.size) continue;
