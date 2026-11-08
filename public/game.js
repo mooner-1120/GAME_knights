@@ -2,7 +2,7 @@
 // 구성: 설정 → 렌더러/월드 → 블록형 기사 모델·애니메이션 → 1인칭 → 사운드 → 네트워크 → 메뉴/HUD → 입력 → 메인 루프
 
 import * as THREE from 'three';
-import { CLASSES, SKILLS, ARENA, PLAYER, TEAMS, EMOTES, MAPS, resolveCollision, lineBlocked, useMap } from '/classes.js';
+import { CLASSES, SKILLS, ARENA, PLAYER, TEAMS, EMOTES, MAPS, PROJ, resolveCollision, lineBlocked, projBlocked, useMap } from '/classes.js';
 import { t, cname, cdesc, crole, sname, sdesc, setLang, getLang, onLang, applyI18n, LANGS } from './i18n.js';
 
 const $ = (id) => document.getElementById(id);
@@ -974,53 +974,89 @@ function updateViewmodel(dt) {
   vm.visible = me.alive;
 }
 
-/* ═════════════ 사운드 (WebAudio) ═════════════ */
+/* ═════════════ 사운드 (WebAudio) ═════════════
+   귀가 아프지 않게: 모든 소리가 저역 통과 필터와 컴프레서를 거치고, 시작을 부드럽게(어택) 하며, 약한 울림(리버브)을 섞습니다. */
 let ac, master;
+function makeImpulse(a, sec, decay) {
+  const len = Math.floor(a.sampleRate * sec), buf = a.createBuffer(2, len, a.sampleRate);
+  for (let c = 0; c < 2; c++) {
+    const d = buf.getChannelData(c);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+  }
+  return buf;
+}
 function actx() {
   if (!ac) {
     ac = new (window.AudioContext || window.webkitAudioContext)();
     master = ac.createGain();
     master.gain.value = S.vol;
-    master.connect(ac.destination);
+    const trim = ac.createGain(); trim.gain.value = 0.55;
+    const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 5200; lp.Q.value = 0.5; // 날카로운 고음을 깎음
+    const comp = ac.createDynamicsCompressor();
+    comp.threshold.value = -22; comp.knee.value = 20; comp.ratio.value = 6; comp.attack.value = 0.003; comp.release.value = 0.25; // 큰 소리를 눌러 줌
+    master.connect(trim).connect(lp).connect(comp).connect(ac.destination);
+    try {
+      const verb = ac.createConvolver(); verb.buffer = makeImpulse(ac, 0.9, 2.8);
+      const vg = ac.createGain(); vg.gain.value = 0.22;
+      lp.connect(verb).connect(vg).connect(comp);
+    } catch {}
   }
   if (ac.state === 'suspended') ac.resume();
   return ac;
 }
 const out = () => { actx(); return master; };
-function tone(type, f0, f1, dur, vol) {
+// 부드러운 시작(attack)과 자연스러운 감쇠를 가진 톤
+function tone(type, f0, f1, dur, vol, atk = 0.006, cut = 0) {
   const a = actx(), t = a.currentTime;
   const o = a.createOscillator(), g = a.createGain();
   o.type = type;
   o.frequency.setValueAtTime(f0, t);
-  if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(f1, t + dur * 0.8);
-  g.gain.setValueAtTime(vol, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-  o.connect(g).connect(out());
-  o.start(t); o.stop(t + dur + 0.02);
+  if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur * 0.85);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(vol, t + atk);
+  g.gain.exponentialRampToValueAtTime(0.0008, t + dur);
+  let node = o;
+  if (cut) { const f = a.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = cut; o.connect(f); node = f; }
+  node.connect(g).connect(out());
+  o.start(t); o.stop(t + dur + 0.03);
 }
-function noiseBurst(dur, f0, f1, vol, type = 'bandpass') {
+function noiseBurst(dur, f0, f1, vol, type = 'bandpass', q = 0.9, atk = 0.012) {
   const a = actx(), t = a.currentTime;
   const buf = a.createBuffer(1, Math.max(1, Math.floor(a.sampleRate * dur)), a.sampleRate);
   const d = buf.getChannelData(0);
-  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  let last = 0;
+  for (let i = 0; i < d.length; i++) { last = last * 0.72 + (Math.random() * 2 - 1) * 0.28; d[i] = last * 3; } // 약하게 걸러 거친 "치지직" 소리를 줄임
   const src = a.createBufferSource(); src.buffer = buf;
-  const f = a.createBiquadFilter(); f.type = type;
+  const f = a.createBiquadFilter(); f.type = type; f.Q.value = q;
   f.frequency.setValueAtTime(f0, t);
-  f.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  f.frequency.exponentialRampToValueAtTime(Math.max(40, f1), t + dur);
   const g = a.createGain();
-  g.gain.setValueAtTime(vol, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(vol, t + Math.min(atk, dur * 0.4));
+  g.gain.exponentialRampToValueAtTime(0.0008, t + dur);
   src.connect(f).connect(g).connect(out());
   src.start(t);
 }
 function safe(fn) { return (...args) => { try { fn(...args); } catch {} }; }
+// 칼이 부딪히는 소리: 날카로운 삼각파 대신 낮은 금속 배음 + 짧은 "챙" 잡음
 const clang = safe((vol = 0.3) => {
-  [1400, 2100, 3300].forEach((f, i) => tone('triangle', f * (0.97 + Math.random() * 0.06), f * 0.97, 0.35, vol / (i + 1.5)));
+  const j = 0.97 + Math.random() * 0.06;
+  [[610, 1], [1480, 0.55], [2410, 0.3]].forEach(([f, k]) => tone('sine', f * j, f * j * 0.985, 0.55, vol * 0.7 * k, 0.003, 4200));
+  noiseBurst(0.06, 3200, 1600, vol * 0.5, 'bandpass', 1.2, 0.002);
 });
-const thud = safe((vol = 0.4) => tone('sine', 140, 45, 0.22, vol));
-const whoosh = safe((vol = 0.15, hi = 2200) => noiseBurst(0.25, 500, hi, vol));
-const horn = safe((vol = 0.25) => { tone('sawtooth', 150, 180, 0.6, vol * 0.5); tone('square', 75, 90, 0.6, vol * 0.5); });
-const stepSnd = safe((vol = 0.1) => noiseBurst(0.07, 500, 150, vol, 'lowpass'));
+const thud = safe((vol = 0.4) => { tone('sine', 130, 48, 0.26, vol * 0.9, 0.004); noiseBurst(0.08, 600, 180, vol * 0.25, 'lowpass', 0.7); });
+const whoosh = safe((vol = 0.15, hi = 2200) => noiseBurst(0.28, 380, Math.min(1500, hi * 0.5), vol * 0.9, 'bandpass', 0.7, 0.07));
+const horn = safe((vol = 0.25) => { tone('triangle', 150, 175, 0.7, vol * 0.5, 0.06, 900); tone('sine', 75, 88, 0.7, vol * 0.6, 0.06); });
+const stepSnd = safe((vol = 0.1) => noiseBurst(0.09, 420, 130, vol * 0.8, 'lowpass', 0.6, 0.01));
+const bowShot = safe((vol = 0.2) => { // 활시위 튕김 + 화살이 공기를 가르는 소리
+  tone('triangle', 260, 120, 0.22, vol * 0.8, 0.003, 1400);
+  noiseBurst(0.18, 700, 2200, vol * 0.5, 'bandpass', 1.3, 0.03);
+});
+const spellCast = safe((vol = 0.2) => { // 부드러운 마법 시전음
+  tone('sine', 360, 820, 0.4, vol * 0.7, 0.05);
+  tone('sine', 540, 1230, 0.4, vol * 0.35, 0.06, 3000);
+  noiseBurst(0.35, 500, 1400, vol * 0.25, 'bandpass', 1.5, 0.08);
+});
 function volFor(id, base) {
   if (id === me.id) return base;
   const r = remotes.get(id);
@@ -1032,7 +1068,7 @@ function volFor(id, base) {
 /* ═════════════ UI: 캐릭터 카드 ═════════════ */
 const STATS = [
   ['s_hp', (c) => c.hp / 150], ['s_speed', (c) => c.speed / 6.5], ['s_dmg', (c) => c.damage / 40],
-  ['s_rate', (c) => 1 / c.cooldown / 2.7], ['s_range', (c) => Math.min(1, c.reach / (c.ranged ? 36 : 5))], ['s_def', (c) => c.block],
+  ['s_rate', (c) => 1 / c.cooldown / 2.7], ['s_range', (c) => Math.min(1, (c.ranged ? c.reach * (PROJ[c.proj]?.ext || 1) / 110 : c.reach / 5))], ['s_def', (c) => c.block],
 ];
 function buildCards(container, selectedId, onPick) {
   container.textContent = '';
@@ -1328,14 +1364,12 @@ function handle(m) {
       if (m.id === me.id) break;
       const r = remotes.get(m.id);
       if (r) startAct(r, 'swing');
-      if (r && CLASSES[r.cls].ranged) shotLater(m.id, r.cls, null);
       whoosh(volFor(m.id, 0.15));
       break;
     }
     case 'skill': {
       const r = remotes.get(m.id);
       if (m.id !== me.id && r) startAct(r, 'skill', m.skill);
-      if (m.id !== me.id && r && RANGED_SK[m.skill]) shotLater(m.id, r.cls, m.skill);
       skillFx(m.id, m.skill);
       break;
     }
@@ -1426,6 +1460,14 @@ function handle(m) {
         if (box) box.insertAdjacentHTML('beforeend', `<div style="margin-top:10px;color:#ffd24a">${esc(t('vote_result', { m: t('mode_' + m.mode), p: t('map_' + m.map) }))}</div>`);
       }
       break;
+    case 'proj':
+      spawnProj(m);
+      break;
+    case 'projend': {
+      const i = shots.findIndex((x) => x.pid === m.pid);
+      if (i >= 0) endShot(i, m.x, m.y, m.z);
+      break;
+    }
     case 'authrequired':
       $('lobmsg').textContent = t('needlogin');
       $('join').disabled = false;
@@ -1652,7 +1694,6 @@ function tryAttack() {
   startMeAct('swing');
   me.blocking = false;
   send({ t: 'attack' });
-  if (c.ranged) shotLater(me.id, me.cls, null);
   whoosh(0.18);
 }
 function useSkill(slot) {
@@ -1668,7 +1709,6 @@ function useSkill(slot) {
   if (def.dash) me.dash = { t: 0, dur: def.dash.dur, speed: def.dash.speed, dx: -Math.sin(me.yaw), dz: -Math.cos(me.yaw) };
   if (def.dur) { me.buffUntil = t + def.dur; me.buffSpeed = def.speedMult || 1; }
   if (def.dash) me.fovK = 14;
-  if (RANGED_SK[id]) shotLater(me.id, me.cls, id);
   if (id === 'bash' || id === 'kick') me.shake = Math.max(me.shake, 0.3);
   skillFx(me.id, id);
 }
@@ -1834,74 +1874,47 @@ function sendEmote(i) {
   toast(`${e.icon} ${t('em_' + e.id)}`);
 }
 
-// 원거리 투사체 (화살 / 마법탄): 판정은 서버가 하고, 여기는 눈에 보이는 연출
+// 원거리 투사체 (화살 / 마법탄): 서버가 보낸 출발점·속도·중력 값으로 서버와 똑같이 날립니다.
+// 사거리(flat)까지는 직선, 그 너머는 중력으로 포물선. 맞았는지는 서버가 정하고 'projend'로 알려 줍니다.
 const shots = [];
 const shotMats = {};
 const shotMat = (color) => (shotMats[color] ??= new THREE.MeshBasicMaterial({ color }));
-function shotLater(id, clsId, skillId) {
-  const c = CLASSES[clsId];
-  const wind = (skillId ? SKILLS[skillId].windup : c.windup) * 1000;
-  setTimeout(() => spawnShot(id, clsId, skillId), wind);
+function spawnProj(m) {
+  const arrow = m.kind === 'arrow';
+  const color = arrow ? 0xd8c8a0 : (SKFX[m.skill]?.[0] ?? CLASSES[m.cls]?.color ?? 0xffffff);
+  const big = !!m.skill;
+  const mesh = new THREE.Mesh(arrow ? BOX(0.03, 0.03, 0.7) : BOX(big ? 0.4 : 0.26, big ? 0.4 : 0.26, big ? 0.4 : 0.26), shotMat(color));
+  mesh.position.set(m.x, m.y, m.z);
+  const vel = new THREE.Vector3(m.vx, m.vy, m.vz);
+  if (arrow) mesh.lookAt(mesh.position.clone().add(vel));
+  scene.add(mesh);
+  shots.push({ m: mesh, vel, trav: 0, flat: m.flat, max: m.max, g: m.g, arrow, color, pid: m.pid, age: 0 });
+  if (m.first) (arrow ? bowShot : spellCast)(volFor(m.by, arrow ? 0.22 : 0.2));
 }
-function spawnShot(id, clsId, skillId) {
-  let x, y, z, yaw, pitch;
-  if (id === me.id) { if (!me.alive) return; ({ x, y, z, yaw, pitch } = me); }
-  else {
-    const r = remotes.get(id);
-    if (!r || !r.alive) return;
-    x = r.root.position.x; y = r.root.position.y; z = r.root.position.z; yaw = r.yaw; pitch = r.pitch;
-  }
-  const c = CLASSES[clsId];
-  const arrow = isBowCls(clsId);
-  const reach = (skillId ? SKILLS[skillId].reach : null) ?? c.reach;
-  const count = skillId === 'volley' ? 5 : 1;
-  const eyeY = y + (id === me.id ? PLAYER.eye - 0.15 : 1.45);
-  for (let i = 0; i < count; i++) {
-    const a = yaw + (count > 1 ? (i / (count - 1) - 0.5) * 0.42 : 0);
-    const cp = Math.cos(pitch);
-    const dir = new THREE.Vector3(-Math.sin(a) * cp, Math.sin(pitch), -Math.cos(a) * cp);
-    const color = arrow ? 0xd8c8a0 : (SKFX[skillId]?.[0] ?? c.color);
-    const mesh = new THREE.Mesh(arrow ? BOX(0.03, 0.03, 0.7) : BOX(skillId ? 0.4 : 0.26, skillId ? 0.4 : 0.26, skillId ? 0.4 : 0.26), shotMat(color));
-    mesh.position.set(x + dir.x * 0.7, eyeY + dir.y * 0.7, z + dir.z * 0.7);
-    if (arrow) mesh.lookAt(mesh.position.clone().add(dir));
-    scene.add(mesh);
-    shots.push({ m: mesh, dir, left: rayStop(mesh.position.x, mesh.position.z, dir, reach, id), arrow, color });
-  }
-  whoosh(volFor(id, 0.2), 3500);
-}
-// 투사체가 날아갈 거리: 사거리 끝까지. 건물·기둥에 막히거나 처음 만나는 사람이 있으면 거기서 멈춤
-function rayStop(sx, sz, dir, reach, shooterId) {
-  const hl = Math.hypot(dir.x, dir.z) || 1, hx = dir.x / hl, hz = dir.z / hl;
-  let max = reach;
-  if (lineBlocked(sx, sz, sx + hx * max, sz + hz * max)) {
-    let lo = 0, hi = max;
-    for (let i = 0; i < 12; i++) {
-      const mid = (lo + hi) / 2;
-      if (lineBlocked(sx, sz, sx + hx * mid, sz + hz * mid)) hi = mid; else lo = mid;
-    }
-    max = lo;
-  }
-  const hit = (px, pz) => {
-    const vx = px - sx, vz = pz - sz, t = vx * hx + vz * hz;
-    if (t < 0 || t > max) return;
-    if (Math.hypot(vx - hx * t, vz - hz * t) < 0.75) max = t;
-  };
-  if (me.alive && shooterId !== me.id) hit(me.x, me.z);
-  for (const r of remotes.values()) if (r.alive && r.id !== shooterId) hit(r.root.position.x, r.root.position.z);
-  return max / hl; // 위아래로 쏴도 수평 사거리만큼 날아가게 보정
+function endShot(i, x, y, z) {
+  const s = shots[i];
+  if (!s.arrow) burst(x, y, z, s.color, 8);
+  scene.remove(s.m);
+  shots.splice(i, 1);
 }
 function updateShots(dt) {
   for (let i = shots.length - 1; i >= 0; i--) {
     const s = shots[i];
-    const d = Math.min(s.left, 90 * dt);
-    s.m.position.addScaledVector(s.dir, d);
-    s.left -= d;
-    if (!s.arrow) { s.m.rotation.z += dt * 10; s.m.rotation.x += dt * 7; }
-    if (s.left <= 0 || s.m.position.y < 0.05) {
-      if (!s.arrow) burst(s.m.position.x, s.m.position.y, s.m.position.z, s.color, 6);
-      scene.remove(s.m);
-      shots.splice(i, 1);
+    s.age += dt;
+    const speed = s.vel.length();
+    const n = Math.max(1, Math.ceil((speed * dt) / 0.8)), h = dt / n;
+    let done = s.age > 6;
+    for (let k = 0; k < n && !done; k++) {
+      const p = s.m.position, ox = p.x, oy = p.y, oz = p.z;
+      const sp = s.vel.length();
+      if (s.trav >= s.flat) s.vel.y -= s.g * h;
+      p.addScaledVector(s.vel, h);
+      s.trav += sp * h;
+      if (p.y <= 0 || s.trav >= s.max || projBlocked(ox, oy, oz, p.x, p.y, p.z)) done = true;
     }
+    if (s.arrow) s.m.lookAt(s.m.position.clone().add(s.vel)); // 화살촉이 날아가는 방향을 따라 기울어짐
+    else { s.m.rotation.z += dt * 10; s.m.rotation.x += dt * 7; }
+    if (done) endShot(i, s.m.position.x, s.m.position.y, s.m.position.z);
   }
 }
 
