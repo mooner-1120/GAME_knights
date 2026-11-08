@@ -54,6 +54,11 @@
   #pv-skill em, .skl em { font-style: normal; color: #fff3b0; }
   #hero { font: 40px/1.2 var(--px); color: var(--gold); text-shadow: 5px 5px 0 #000; margin: 0 0 6px; }
   .sub { margin: 0 0 22px; color: #9fb0c8; font-size: 13px; letter-spacing: 2px; }
+  .h2 { margin: 0 0 12px; font: 15px var(--px); color: var(--gold); }
+  .inp { width: min(260px, 100%); padding: 10px 12px; font: 14px var(--font); color: #fff; background: #0d121c; border: 3px solid #000; outline: none; user-select: text; -webkit-user-select: text; }
+  .inp:focus { border-color: var(--ac); }
+  .rrow { display: flex; align-items: center; gap: 12px; padding: 10px; margin-bottom: 6px; background: rgba(12,18,30,.9); border: 3px solid #000; font-size: 13px; }
+  .rrow .nm { flex: 1; min-width: 0; } .rrow small { display: block; color: #8fa3c0; }
   #name { width: min(360px, 100%); padding: 12px 14px; font: 16px var(--font); color: #fff; background: #0d121c; border: 3px solid #000; outline: none; user-select: text; -webkit-user-select: text; }
   #name:focus { border-color: var(--ac); }
   #lobmsg { min-height: 22px; margin: 14px 0 4px; color: #ff8a7a; font-size: 13px; }
@@ -227,6 +232,7 @@
         <button class="btn" id="m-resume" data-i18n="resume"></button>
         <button class="btn2" data-view="chars" data-i18n="chooseClass"></button>
         <button class="btn2" id="m-mode" style="display:none"></button>
+        <button class="btn2" id="m-map" style="display:none"></button>
         <button class="btn2" data-view="settings" data-i18n="settings"></button>
         <button class="btn2" data-view="help" data-i18n="controls"></button>
         <button class="btn2 danger" id="m-home" data-i18n="home"></button>
@@ -284,6 +290,7 @@
     <div id="nav">
       <button class="on" data-tab="play" data-i18n="nav_play"></button>
       <button data-tab="class" data-i18n="nav_class"></button>
+      <button data-tab="rooms" data-i18n="nav_rooms"></button>
       <button data-tab="ranks" data-i18n="nav_ranks"></button>
       <button data-tab="settings" data-i18n="nav_settings"></button>
     </div>
@@ -308,6 +315,22 @@
       </section>
       <section class="tab" id="tab-class">
         <div class="cards" id="cards"></div>
+      </section>
+      <section class="tab box" id="tab-rooms">
+        <h2 class="h2" data-i18n="rooms_title"></h2>
+        <div id="roomlist"></div>
+        <p class="note" id="roomempty"></p>
+        <button class="btn2" id="room-refresh" data-i18n="room_refresh"></button>
+        <h2 class="h2" style="margin-top:22px" data-i18n="room_create"></h2>
+        <div class="row">
+          <input class="inp" id="rc-name" maxlength="24" data-i18n-ph="room_name">
+          <input class="inp" id="rc-pass" maxlength="16" data-i18n-ph="room_pass">
+        </div>
+        <div class="row" style="margin-top:10px">
+          <select id="rc-mode"></select><select id="rc-map"></select><select id="rc-max"></select>
+          <button class="btn" id="rc-go" data-i18n="room_create"></button>
+        </div>
+        <p class="note" data-i18n="room_hostnote"></p>
       </section>
       <section class="tab box" id="tab-ranks">
         <h2 style="margin:0 0 12px;font:15px var(--px);color:var(--gold)" data-i18n="leaderboard"></h2>

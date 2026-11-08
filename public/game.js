@@ -2,7 +2,7 @@
 // 구성: 설정 → 렌더러/월드 → 블록형 기사 모델·애니메이션 → 1인칭 → 사운드 → 네트워크 → 메뉴/HUD → 입력 → 메인 루프
 
 import * as THREE from 'three';
-import { CLASSES, SKILLS, ARENA, PLAYER, TEAMS, EMOTES, resolveCollision, lineBlocked } from '/classes.js';
+import { CLASSES, SKILLS, ARENA, PLAYER, TEAMS, EMOTES, MAPS, resolveCollision, lineBlocked, useMap } from '/classes.js';
 import { t, cname, cdesc, crole, sname, sdesc, setLang, getLang, onLang, applyI18n, LANGS } from './i18n.js';
 
 const $ = (id) => document.getElementById(id);
@@ -113,11 +113,38 @@ const BOX = (w, h, d) => {
   return g;
 };
 
-/* ═════════════ 월드 (마인크래프트풍 경기장) ═════════════ */
-{
+/* ═════════════ 월드 (맵마다 다시 만들 수 있음) ═════════════ */
+const THEMES = {
+  town:      { grass: ['#5b9a3a', '#3f7a2a'], stone: ['#8a8780', TH.stone[1]], dirt: '#7f6647', dirtR: 15, streets: true, sky: ['#86b4e6', '#9cc2ee'] },
+  fortress:  { grass: ['#5a8a45', '#3f6a2f'], stone: ['#7a7a82', '#4d4d55'], dirt: '#6f5a40', dirtR: 0, courtyard: 36, sky: ['#9aa9bd', '#b4bfcc'] },
+  forest:    { grass: ['#3f7d2e', '#2c5f1f'], stone: ['#7d8077', '#555850'], dirt: '#6a5238', dirtR: 9, sky: ['#8fbf9a', '#a9d0a8'] },
+  colosseum: { grass: ['#d7c08a', '#b89f66'], stone: ['#c9b27a', '#9c8855'], dirt: '#d2b97c', dirtR: 34, sky: ['#f0b87a', '#f5cf9e'] },
+};
+let worldObjs = [];
+let currentMap = 'town';
+function clearWorld() {
+  for (const o of worldObjs) {
+    scene.remove(o);
+    o.traverse?.((n) => { n.geometry?.dispose?.(); if (n.material && !Array.isArray(n.material)) n.material.dispose?.(); });
+  }
+  worldObjs = [];
+}
+function applyMap(id) {
+  if (!MAPS[id] || id === currentMap) return;
+  currentMap = id;
+  useMap(id);
+  buildWorld();
+}
+function buildWorld() {
+  clearWorld();
+  const _add = scene.add.bind(scene);
+  scene.add = (...o) => { worldObjs.push(...o); return _add(...o); };
+  const TH = THEMES[ARENA.theme] || THEMES.town;
+  scene.background = new THREE.Color(TH.sky[0]);
+  scene.fog = new THREE.Fog(TH.sky[1], 35, 130);
   const grass = pixTex(16, 16, (g) => {
-    noise(g, 0, 0, 16, 16, '#5b9a3a', 0.16);
-    for (let i = 0; i < 16; i++) px(g, (Math.random() * 16) | 0, (Math.random() * 16) | 0, '#3f7a2a');
+    noise(g, 0, 0, 16, 16, TH.grass[0], 0.16);
+    for (let i = 0; i < 16; i++) px(g, (Math.random() * 16) | 0, (Math.random() * 16) | 0, TH.grass[1]);
   }, true);
   grass.repeat.set(40, 40);
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(ARENA.half * 2, ARENA.half * 2), new THREE.MeshLambertMaterial({ map: grass }));
@@ -126,20 +153,21 @@ const BOX = (w, h, d) => {
   scene.add(ground);
 
   const dirtTex = pixTex(16, 16, (g) => {
-    noise(g, 0, 0, 16, 16, '#7f6647', 0.14);
+    noise(g, 0, 0, 16, 16, TH.dirt, 0.14);
     for (let i = 0; i < 12; i++) px(g, (Math.random() * 16) | 0, (Math.random() * 16) | 0, '#5d4a31');
   }, true);
   dirtTex.repeat.set(8, 8);
-  const dirt = new THREE.Mesh(new THREE.CircleGeometry(15, 48), new THREE.MeshLambertMaterial({ map: dirtTex }));
+  const dirt = new THREE.Mesh(new THREE.CircleGeometry(Math.max(TH.dirtR, 0.01), 48), new THREE.MeshLambertMaterial({ map: dirtTex }));
   dirt.rotation.x = -Math.PI / 2;
   dirt.position.y = 0.01;
   dirt.receiveShadow = true;
+  dirt.visible = TH.dirtR > 0;
   scene.add(dirt);
 
   const stoneTex = pixTex(16, 16, (g) => {
-    noise(g, 0, 0, 16, 16, '#8a8780', 0.1);
-    px(g, 0, 7, '#5d5b56', 16, 1); px(g, 0, 15, '#5d5b56', 16, 1);
-    px(g, 3, 0, '#5d5b56', 1, 7); px(g, 11, 8, '#5d5b56', 1, 7);
+    noise(g, 0, 0, 16, 16, TH.stone[0], 0.1);
+    px(g, 0, 7, TH.stone[1], 16, 1); px(g, 0, 15, TH.stone[1], 16, 1);
+    px(g, 3, 0, TH.stone[1], 1, 7); px(g, 11, 8, TH.stone[1], 1, 7);
   }, true);
   const stoneMat = (rx, ry) => {
     const t = stoneTex.clone();
@@ -170,26 +198,28 @@ const BOX = (w, h, d) => {
   const woodTex = pixTex(16, 16, (g) => { noise(g, 0, 0, 16, 16, '#7a5a36', 0.12); for (let i = 0; i < 16; i += 4) px(g, 0, i, '#4e3820', 16, 1); }, true);
   const cobTex = pixTex(16, 16, (g) => { noise(g, 0, 0, 16, 16, '#9b958a', 0.1); px(g, 0, 7, '#6d6a62', 16, 1); px(g, 0, 15, '#6d6a62', 16, 1); px(g, 4, 0, '#6d6a62', 1, 7); px(g, 12, 8, '#6d6a62', 1, 7); }, true);
   // 십자 대로 + 중앙 광장 (돌바닥)
-  for (const [w, d] of [[ARENA.half * 2, 8], [8, ARENA.half * 2]]) {
+  if (TH.streets) for (const [w, d] of [[ARENA.half * 2, 8], [8, ARENA.half * 2]]) {
     const st = new THREE.Mesh(new THREE.PlaneGeometry(w, d), tiled(cobTex, w / 2, d / 2));
     st.rotation.x = -Math.PI / 2; st.position.y = 0.02; st.receiveShadow = true; scene.add(st);
   }
-  const plaza = new THREE.Mesh(new THREE.CircleGeometry(9, 32), tiled(cobTex, 5, 5));
-  plaza.rotation.x = -Math.PI / 2; plaza.position.y = 0.03; plaza.receiveShadow = true; scene.add(plaza);
+  if (TH.courtyard) { const cy = new THREE.Mesh(new THREE.PlaneGeometry(TH.courtyard, TH.courtyard), tiled(cobTex, TH.courtyard / 2, TH.courtyard / 2)); cy.rotation.x = -Math.PI / 2; cy.position.y = 0.03; cy.receiveShadow = true; scene.add(cy); }
+  if (TH.streets) { const plaza = new THREE.Mesh(new THREE.CircleGeometry(9, 32), tiled(cobTex, 5, 5));
+  plaza.rotation.x = -Math.PI / 2; plaza.position.y = 0.03; plaza.receiveShadow = true; scene.add(plaza); }
 
   const mk = (geo, mat, x, y, z) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.castShadow = m.receiveShadow = true; scene.add(m); return m; };
   const windowMat = lam(0x2a3a4a), doorMat = lam(0x3a2412), leafMat = lam(0x3f8a34), trunkMat = lam(0x5a3d22), waterMat = new THREE.MeshLambertMaterial({ color: 0x3d7fd0 });
   // 건물
   for (const b of ARENA.boxes) {
-    const tower = b.h >= 9;
-    mk(new THREE.BoxGeometry(b.w, b.h, b.d), tower ? stoneMat(b.w / 2, b.h / 2) : tiled(plasterTex, b.w / 3, b.h / 3), b.x, b.h / 2, b.z);
+    const stoneBox = b.style === 'stone', tower = stoneBox && b.h >= 9;
+    mk(new THREE.BoxGeometry(b.w, b.h, b.d), stoneBox ? stoneMat(Math.max(b.w, b.d) / 2, b.h / 2) : tiled(plasterTex, b.w / 3, b.h / 3), b.x, b.h / 2, b.z);
     if (tower) {
       for (const [dx, dz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) mk(BOX(1.4, 1.4, 1.4), merlonMat, b.x + dx * (b.w / 2 - 0.7), b.h + 0.7, b.z + dz * (b.d / 2 - 0.7));
-    } else {
+    } else if (!stoneBox) {
       mk(new THREE.BoxGeometry(b.w + 1, 0.7, b.d + 1), tiled(roofTex, b.w / 2, 1), b.x, b.h + 0.35, b.z);
       mk(new THREE.BoxGeometry(b.w - 0.6, 0.7, b.d - 0.6), tiled(roofTex, b.w / 2, 1), b.x, b.h + 1.05, b.z);
       mk(new THREE.BoxGeometry(b.w - 2.2, 0.7, b.d - 2.2), tiled(roofTex, b.w / 3, 1), b.x, b.h + 1.75, b.z);
     }
+    if (stoneBox) continue;
     const zs = b.z > 0 ? -1 : 1; // 가운데 대로를 향한 면에 문과 창
     mk(BOX(1.3, 2.2, 0.15), doorMat, b.x, 1.1, b.z + zs * (b.d / 2 + 0.03));
     for (const wx of [-b.w / 4, b.w / 4]) mk(BOX(0.9, 1.0, 0.12), windowMat, b.x + wx, Math.min(b.h - 1, 3.6), b.z + zs * (b.d / 2 + 0.03));
@@ -211,6 +241,12 @@ const BOX = (w, h, d) => {
       mk(BOX(0.12, 2.2, 0.12), trunkMat, p.x - p.r + 0.1, 1.9, p.z);
       mk(BOX(0.12, 2.2, 0.12), trunkMat, p.x + p.r - 0.1, 1.9, p.z);
       mk(BOX(p.r * 2.6, 0.2, 1.4), tiled(roofTex, 2, 1), p.x, 3.1, p.z);
+    } else if (p.kind === 'column') {
+      mk(new THREE.CylinderGeometry(p.r * 0.8, p.r, 6.5, 12), merlonMat, p.x, 3.25, p.z);
+      mk(BOX(p.r * 2.4, 0.5, p.r * 2.4), merlonMat, p.x, 6.7, p.z);
+    } else if (p.kind === 'dais') {
+      mk(new THREE.CylinderGeometry(p.r + 0.5, p.r + 0.9, 0.5, 28), merlonMat, p.x, 0.25, p.z);
+      mk(new THREE.CylinderGeometry(p.r - 0.6, p.r - 0.6, 1.0, 28), merlonMat, p.x, 0.5, p.z);
     } else {
       mk(new THREE.CylinderGeometry(p.r * 0.9, p.r, 1.2, 12), tiled(woodTex, 2, 1), p.x, 0.6, p.z);
     }
@@ -224,7 +260,9 @@ const BOX = (w, h, d) => {
     cl.position.set(Math.cos(a) * r, rand(48, 75), Math.sin(a) * r);
     scene.add(cl);
   }
+  scene.add = _add;
 }
+buildWorld();
 
 /* ═════════════ 기사 모델 (마인크래프트 비율: 머리 8 · 몸통 12 · 팔다리 12 픽셀 = 키 1.8m) ═════════════ */
 const U = 0.225; // 4픽셀
@@ -812,6 +850,8 @@ let selectedCls = 'knight';
 let deadUntil = 0;
 let killerName = '';
 let mouseR = false;
+let pendingJoin = {};
+let vote = null;
 let chatOpen = false, chatTeam = false, emoteOpen = false, emoteTimer = 0, endTimer = 0;
 let matchInfo = { mode: 'ffa', limit: 20, teamScore: { 1: 0, 2: 0 }, over: false, hostId: null };
 const TEAM_CSS = { 1: '#ff8c7a', 2: '#8ab8ff' };
@@ -1182,7 +1222,7 @@ function connect() {
   $('lobmsg').textContent = t('connecting');
   const sock = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
   ws = sock;
-  sock.onopen = () => send({ t: 'join', name, cls: selectedCls, token: window.ironToken || null });
+  sock.onopen = () => { send({ t: 'join', name, cls: selectedCls, token: window.ironToken || null, ...pendingJoin }); pendingJoin = {}; };
   sock.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch (err) { console.error(err); } };
   sock.onerror = () => {};
   sock.onclose = () => {
@@ -1243,6 +1283,7 @@ function handle(m) {
       me.streak = 0;
       Object.assign(me, { team: m.team || 0, id: m.id, cls: m.cls, x: m.x, y: m.y, z: m.z, yaw: m.yaw, pitch: 0, hp: m.hp, alive: true });
       roster = m.roster;
+      applyMap(m.map || 'town');
       joined = true;
       buildViewmodel();
       syncRemotes();
@@ -1358,6 +1399,28 @@ function handle(m) {
       me.x = m.x; me.y = m.y; me.z = m.z;
       me.dash = null;
       break;
+    case 'error':
+      $('lobmsg').textContent = t('err_' + m.code);
+      $('join').disabled = false;
+      ws?.close();
+      ws = null;
+      break;
+    case 'votestart':
+      vote = { modes: m.modes, maps: m.maps, myMode: null, myMap: null, counts: null, done: false };
+      if ($('x-end').style.display === 'none') { $('x-end').innerHTML = '<div id="x-vote"></div><div id="x-endcd"></div>'; $('x-end').style.display = 'block'; startEndCountdown(m.ms + 3000); }
+      renderVote();
+      break;
+    case 'votestatus':
+      if (vote) { vote.counts = m; renderVote(); }
+      break;
+    case 'voteend':
+      if (vote) {
+        vote.done = true;
+        renderVote();
+        const box = $('x-vote');
+        if (box) box.insertAdjacentHTML('beforeend', `<div style="margin-top:10px;color:#ffd24a">${esc(t('vote_result', { m: t('mode_' + m.mode), p: t('map_' + m.map) }))}</div>`);
+      }
+      break;
     case 'authrequired':
       $('lobmsg').textContent = t('needlogin');
       $('join').disabled = false;
@@ -1365,8 +1428,9 @@ function handle(m) {
       ws = null;
       break;
     case 'match':
-      matchInfo = { mode: m.mode, limit: m.limit, teamScore: m.teamScore, over: m.over, hostId: m.hostId };
-      if (!m.over) { clearInterval(endTimer); $('x-end').style.display = 'none'; }
+      matchInfo = { mode: m.mode, limit: m.limit, teamScore: m.teamScore, over: m.over, hostId: m.hostId, map: m.map, custom: m.custom, room: m.room, remainMs: m.remainMs, at: performance.now() };
+      applyMap(m.map);
+      if (!m.over) { vote = null; clearInterval(endTimer); $('x-end').style.display = 'none'; }
       updateMatchHud();
       break;
     case 'matchend':
@@ -1476,6 +1540,7 @@ function goLobby(msg = '') {
   $('feed').textContent = '';
   $('floaters').textContent = '';
   $('hud').style.display = 'none';
+  vote = null; clearInterval(endTimer); applyMap('town');
   $('x-match').style.display = 'none'; $('x-end').style.display = 'none'; $('x-chatlog').textContent = '';
   $('death').style.display = 'none';
   $('lobby').style.display = 'flex';
@@ -1533,6 +1598,12 @@ addEventListener('keydown', (e) => {
     const n = parseInt(e.code.replace('Digit', ''), 10);
     openEmoteList(false);
     if (n >= 1 && n <= EMOTES.length) sendEmote(n - 1);
+    return;
+  }
+  if (vote && !vote.done) {
+    const k = parseInt(e.code.replace('Digit', ''), 10) - 1;
+    if (k >= 0 && k < vote.modes.length) castVote('mode', vote.modes[k]);
+    else if (vote.maps.length > 1 && k >= vote.modes.length && k - vote.modes.length < vote.maps.length) castVote('map', vote.maps[k - vote.modes.length]);
     return;
   }
   if (e.code === 'KeyV') openEmoteList(true);
@@ -1621,7 +1692,8 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '
   #x-end{position:fixed;inset:0;z-index:26;display:none;background:rgba(0,0,0,.55);color:#f3e7c4;font-family:var(--font);text-align:center;padding-top:12vh}
   #x-end h1{font-size:46px;margin:0 0 6px;text-shadow:0 3px 0 #000}
   #x-end table{margin:18px auto;border-collapse:collapse;font:16px var(--font);min-width:360px}
-  #x-end td,#x-end th{padding:4px 14px;border-bottom:1px solid #5a4a2a}`;
+  #x-end td,#x-end th{padding:4px 14px;border-bottom:1px solid #5a4a2a}
+  #x-vote{margin:10px auto;max-width:640px}#x-vote .vrow{margin:8px 0}#x-vote .vbtn{margin:3px;font-family:var(--font);font-size:13px}#x-vote .vbtn.sel{outline:3px solid #4db2ff;background:#26324a}#x-vote i{font-style:normal;color:#ffd24a;margin-left:6px}#x-vote .note{color:#8fa3c0;font-size:12px;margin-top:6px}`;
   document.head.appendChild(st);
   const mk = (id) => { const d = document.createElement('div'); d.id = id; document.body.appendChild(d); return d; };
   mk('x-match'); mk('x-chatlog'); mk('x-end');
@@ -1640,33 +1712,57 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '
   });
 })();
 
+function timeHtml() {
+  if (matchInfo.over || matchInfo.remainMs == null) return '';
+  const left = Math.max(0, matchInfo.remainMs - (performance.now() - matchInfo.at));
+  const s = Math.ceil(left / 1000);
+  return `<div style="font:22px var(--px);color:${s <= 30 ? '#ff6a5a' : '#fff'}">${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}</div>`;
+}
 function updateMatchHud() {
   const el = $('x-match');
   if (!joined) { el.style.display = 'none'; return; }
   el.style.display = 'block';
+  const tm = timeHtml();
   if (matchInfo.mode === 'tdm') {
     const mine = me.team ? `${esc(t('m_myteam'))}: <span style="color:${TEAM_CSS[me.team]}">${esc(t('team_' + me.team))}</span> · ` : '';
-    el.innerHTML = `<span style="color:${TEAM_CSS[1]}">${esc(t('team_1'))} ${matchInfo.teamScore[1]}</span> <b>:</b> <span style="color:${TEAM_CSS[2]}">${matchInfo.teamScore[2]} ${esc(t('team_2'))}</span><small>${mine}${esc(t('m_tdm', { n: matchInfo.limit }))}</small>`;
+    el.innerHTML = tm + `<span style="color:${TEAM_CSS[1]}">${esc(t('team_1'))} ${matchInfo.teamScore[1]}</span> <b>:</b> <span style="color:${TEAM_CSS[2]}">${matchInfo.teamScore[2]} ${esc(t('team_2'))}</span><small>${mine}${esc(t('m_tdm', { n: matchInfo.limit }))}</small>`;
   } else {
     const top = [...roster].sort((a, b) => b.kills - a.kills)[0];
-    el.innerHTML = `${esc(t('m_ffa', { n: matchInfo.limit }))}<small>${top ? esc(t('m_lead', { n: top.name, k: top.kills })) : ''}</small>`;
+    el.innerHTML = tm + `${esc(t('m_ffa', { n: matchInfo.limit }))}<small>${top ? esc(t('m_lead', { n: top.name, k: top.kills })) : ''}</small>`;
   }
 }
 
 function showMatchEnd(m) {
   const el = $('x-end');
-  const title = esc(m.mode === 'tdm' ? t('win_team', { t: t('team_' + m.winnerTeam) }) : t('win_player', { n: nameOf(m.winnerId) }));
-  const mineWon = m.mode === 'tdm' ? m.winnerTeam === me.team : m.winnerId === me.id;
+  const title = esc(m.draw ? t('draw') : m.mode === 'tdm' ? t('win_team', { t: t('team_' + m.winnerTeam) }) : t('win_player', { n: nameOf(m.winnerId) }));
+  const mineWon = !m.draw && (m.mode === 'tdm' ? m.winnerTeam === me.team : m.winnerId === me.id);
   const rows = m.board.slice(0, 8).map((r) => `<tr style="color:${m.mode === 'tdm' ? TEAM_CSS[r.team] : '#f3e7c4'}"><td>${esc(r.name)}</td><td>${esc(CLASSES[r.cls] ? cname(CLASSES[r.cls]) : r.cls)}</td><td>${r.kills}</td><td>${r.deaths}</td></tr>`).join('');
-  el.innerHTML = `<h1>${title}</h1><div>${esc(mineWon ? t('victory') : t('defeat'))}</div><table><tr><th>${esc(t('b_name'))}</th><th>${esc(t('b_class'))}</th><th>${esc(t('b_kills'))}</th><th>${esc(t('b_deaths'))}</th></tr>${rows}</table><div id="x-endcd"></div>`;
+  el.innerHTML = `<h1>${title}</h1><div>${m.draw ? '' : esc(mineWon ? t('victory') : t('defeat'))}</div><table><tr><th>${esc(t('b_name'))}</th><th>${esc(t('b_class'))}</th><th>${esc(t('b_kills'))}</th><th>${esc(t('b_deaths'))}</th></tr>${rows}</table><div id="x-vote"></div><div id="x-endcd"></div>`;
   el.style.display = 'block';
-  const until = performance.now() + m.nextMs;
+  startEndCountdown(m.nextMs);
+}
+function startEndCountdown(ms) {
+  const until = performance.now() + ms;
   clearInterval(endTimer);
   endTimer = setInterval(() => {
     const left = Math.max(0, Math.ceil((until - performance.now()) / 1000));
     const cd = $('x-endcd');
     if (cd) cd.textContent = t('nextmatch', { s: left });
   }, 250);
+}
+function renderVote() {
+  const el = $('x-vote');
+  if (!el || !vote) return;
+  let n = 0;
+  const row = (key, opts, label) => `<div class="vrow"><b>${esc(t(key === 'mode' ? 'vote_mode' : 'vote_map'))}</b> ` + opts.map((o) => `<button class="btn2 vbtn${vote[key === 'mode' ? 'myMode' : 'myMap'] === o ? ' sel' : ''}" data-k="${key}" data-v="${o}">[${++n}] ${esc(label(o))} <i>${vote.counts?.[key]?.[o] ?? 0}</i></button>`).join(' ') + '</div>';
+  el.innerHTML = `<h3 style="margin:14px 0 4px">${esc(t('vote_title'))}</h3>` + row('mode', vote.modes, (o) => t('mode_' + o)) + (vote.maps.length > 1 ? row('map', vote.maps, (o) => t('map_' + o)) : '') + `<div class="note">${esc(t('vote_hint'))}</div>`;
+  if (!vote.done) el.querySelectorAll('.vbtn').forEach((b) => { b.onclick = () => castVote(b.dataset.k, b.dataset.v); });
+}
+function castVote(key, val) {
+  if (!vote || vote.done) return;
+  vote[key === 'mode' ? 'myMode' : 'myMap'] = val;
+  send({ t: 'vote', [key]: val });
+  renderVote();
 }
 
 // 말풍선 (채팅/이모트)
@@ -1889,15 +1985,66 @@ onLang(() => {
   renderEmotes();
   updateMatchHud();
 });
+const MAP_IDS = Object.keys(MAPS);
 function updateModeBtn() {
-  const b = $('m-mode');
+  const b = $('m-mode'), mb = $('m-map');
   if (!b) return;
   const host = joined && me.id != null && matchInfo.hostId === me.id;
   b.style.display = host ? '' : 'none';
-  if (host) b.textContent = `${t('host_mode')} → ${t(matchInfo.mode === 'tdm' ? 'mode_ffa' : 'mode_tdm')}`;
+  mb.style.display = host ? '' : 'none';
+  if (host) {
+    b.textContent = `${t('host_mode')} → ${t(matchInfo.mode === 'tdm' ? 'mode_ffa' : 'mode_tdm')}`;
+    mb.textContent = `${t('host_map')} → ${t('map_' + MAP_IDS[(MAP_IDS.indexOf(matchInfo.map) + 1) % MAP_IDS.length])}`;
+  }
 }
+$('m-map').onclick = () => send({ t: 'setroom', map: MAP_IDS[(MAP_IDS.indexOf(matchInfo.map) + 1) % MAP_IDS.length] });
+setInterval(updateMatchHud, 500);
 setInterval(updateModeBtn, 500);
 $('m-mode').onclick = () => send({ t: 'setmode', mode: matchInfo.mode === 'tdm' ? 'ffa' : 'tdm' });
+/* ── 방 목록 / 방 만들기 ── */
+function fillRoomForm() {
+  $('rc-mode').innerHTML = ['ffa', 'tdm'].map((x) => `<option value="${x}">${esc(t('mode_' + x))}</option>`).join('');
+  $('rc-map').innerHTML = MAP_IDS.map((x) => `<option value="${x}">${esc(t('map_' + x))}</option>`).join('');
+  $('rc-max').innerHTML = [2, 4, 6, 8, 10, 12, 16].map((n) => `<option value="${n}"${n === 8 ? ' selected' : ''}>${esc(t('room_max'))}: ${n}</option>`).join('');
+}
+async function refreshRooms() {
+  let data;
+  try { data = await (await fetch('/rooms.json', { cache: 'no-store' })).json(); } catch { return; }
+  const box = $('roomlist');
+  box.textContent = '';
+  $('roomempty').textContent = data.list.length ? '' : t('room_empty');
+  for (const r of data.list) {
+    const row = document.createElement('div');
+    row.className = 'rrow';
+    const nm = document.createElement('div');
+    nm.className = 'nm';
+    nm.textContent = `${r.locked ? '🔒 ' : ''}${r.name}`;
+    const sm = document.createElement('small');
+    sm.textContent = `${t(r.custom ? 'room_host' : 'room_public')} · ${t('mode_' + r.mode)} · ${t('map_' + r.map)} · ${r.count}/${r.max}`;
+    nm.appendChild(sm);
+    const btn = document.createElement('button');
+    btn.className = 'btn2';
+    btn.textContent = t('room_join');
+    btn.disabled = r.count >= r.max;
+    btn.onclick = () => {
+      let password = '';
+      if (r.locked) { password = window.prompt(t('room_pw_prompt')) ?? null; if (password === null) return; }
+      pendingJoin = { room: r.id, password };
+      $('join').click();
+    };
+    row.append(nm, btn);
+    box.appendChild(row);
+  }
+}
+$('room-refresh').onclick = refreshRooms;
+$('rc-go').onclick = () => {
+  pendingJoin = { create: { name: $('rc-name').value, password: $('rc-pass').value, mode: $('rc-mode').value, map: $('rc-map').value, max: Number($('rc-max').value) } };
+  $('join').click();
+};
+document.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { if (b.dataset.tab === 'rooms') refreshRooms(); }));
+setInterval(() => { if ($('tab-rooms').classList.contains('on') && $('lobby').style.display !== 'none') refreshRooms(); }, 5000);
+fillRoomForm();
+onLang(() => { fillRoomForm(); refreshRooms(); });
 applyI18n();
 initPreview();
 setPreviewClass(selectedCls);
@@ -2052,7 +2199,7 @@ function frame(now) {
   if (fpsAcc >= 0.5) { fps = Math.round(fpsN / fpsAcc); fpsAcc = 0; fpsN = 0; }
   update(dt, performance.now());
   camera.children.forEach((o) => { o.visible = joined; });
-  if (!joined) { const a = now / 9000; camera.position.set(Math.cos(a) * 64, 26, Math.sin(a) * 64); camera.lookAt(0, 3, 0); }
+  if (!joined) { const a = now / 9000; camera.position.set(Math.cos(a) * ARENA.half * 1.35, 26, Math.sin(a) * ARENA.half * 1.35); camera.lookAt(0, 3, 0); }
   renderer.render(scene, camera);
   renderPreview(dt);
 }
