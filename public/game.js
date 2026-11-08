@@ -18,12 +18,13 @@ const lerpAngle = (a, b, k) => {
 };
 
 /* ═════════════ 설정 (브라우저에 저장) ═════════════ */
+const IS_TOUCH = matchMedia('(pointer: coarse)').matches; // 휴대폰/태블릿: 터치 조작 UI 사용
 const QUALITY = {
   low: { ratio: 0.7, shadow: 0 },
   mid: { ratio: 1, shadow: 1024 },
   high: { ratio: Math.min(window.devicePixelRatio || 1, 1.5), shadow: 2048 },
 };
-const DEFAULTS = { sens: 1, fov: 75, vol: 0.7, quality: 'mid', minimap: true, netinfo: false, bob: true };
+const DEFAULTS = { sens: 1, fov: 75, vol: 0.7, quality: IS_TOUCH ? 'low' : 'mid', minimap: true, netinfo: false, bob: true };
 const S = { ...DEFAULTS };
 try {
   const raw = JSON.parse(localStorage.getItem('ironoath_settings') || '{}');
@@ -851,6 +852,7 @@ let deadUntil = 0;
 let killerName = '';
 let mouseR = false;
 let pendingJoin = {};
+let touchPaused = false;
 let vote = null;
 let chatOpen = false, chatTeam = false, emoteOpen = false, emoteTimer = 0, endTimer = 0;
 let matchInfo = { mode: 'ffa', limit: 20, teamScore: { 1: 0, 2: 0 }, over: false, hostId: null };
@@ -1233,6 +1235,9 @@ function connect() {
   };
 }
 $('join').onclick = () => {
+  if (IS_TOUCH) { // 전체화면 + 가로 고정 시도 (지원하지 않는 기기에서는 조용히 무시)
+    (document.documentElement.requestFullscreen?.() || Promise.resolve()).then(() => screen.orientation?.lock?.('landscape')).catch(() => {});
+  }
   actx();
   connect();
   tryLock();
@@ -1481,7 +1486,7 @@ function skillFx(id, skill) {
 
 /* ═════════════ 메뉴 (ESC) ═════════════ */
 let lobbySettings = false;
-const locked = () => document.pointerLockElement === canvas;
+const locked = IS_TOUCH ? () => joined && !touchPaused && !chatOpen : () => document.pointerLockElement === canvas;
 function showView(v) {
   document.querySelectorAll('.mview').forEach((el) => el.classList.toggle('on', el.id === 'mv-' + v));
   document.querySelector('#menu .mpanel').classList.toggle('wide', v === 'chars');
@@ -1494,6 +1499,7 @@ function refreshMenu() {
   $('menu').style.display = (joined && !locked() && !chatOpen) || lobbySettings ? 'flex' : 'none';
 }
 function tryLock() {
+  if (IS_TOUCH) { touchPaused = false; refreshMenu(); return; }
   try {
     const p = canvas.requestPointerLock();
     if (p && p.catch) p.catch(() => toast(t('lockfail')));
@@ -1618,13 +1624,13 @@ addEventListener('blur', () => resetInput());
 addEventListener('contextmenu', (e) => e.preventDefault());
 
 addEventListener('mousemove', (e) => {
-  if (!locked() || !me.alive) return;
+  if (IS_TOUCH || !locked() || !me.alive) return;
   const k = 0.0022 * S.sens;
   me.yaw -= e.movementX * k;
   me.pitch = clamp(me.pitch - e.movementY * k, -1.45, 1.45);
 });
 addEventListener('mousedown', (e) => {
-  if (!locked() || !joined) return;
+  if (IS_TOUCH || !locked() || !joined) return;
   if (e.button === 0) tryAttack();
   if (e.button === 2) mouseR = true;
 });
@@ -1755,7 +1761,7 @@ function renderVote() {
   if (!el || !vote) return;
   let n = 0;
   const row = (key, opts, label) => `<div class="vrow"><b>${esc(t(key === 'mode' ? 'vote_mode' : 'vote_map'))}</b> ` + opts.map((o) => `<button class="btn2 vbtn${vote[key === 'mode' ? 'myMode' : 'myMap'] === o ? ' sel' : ''}" data-k="${key}" data-v="${o}">[${++n}] ${esc(label(o))} <i>${vote.counts?.[key]?.[o] ?? 0}</i></button>`).join(' ') + '</div>';
-  el.innerHTML = `<h3 style="margin:14px 0 4px">${esc(t('vote_title'))}</h3>` + row('mode', vote.modes, (o) => t('mode_' + o)) + (vote.maps.length > 1 ? row('map', vote.maps, (o) => t('map_' + o)) : '') + `<div class="note">${esc(t('vote_hint'))}</div>`;
+  el.innerHTML = `<h3 style="margin:14px 0 4px">${esc(t('vote_title'))}</h3>` + row('mode', vote.modes, (o) => t('mode_' + o)) + (vote.maps.length > 1 ? row('map', vote.maps, (o) => t('map_' + o)) : '') + `<div class="note">${esc(t(IS_TOUCH ? 'vote_tap' : 'vote_hint'))}</div>`;
   if (!vote.done) el.querySelectorAll('.vbtn').forEach((b) => { b.onclick = () => castVote(b.dataset.k, b.dataset.v); });
 }
 function castVote(key, val) {
@@ -1902,7 +1908,10 @@ function updateShots(dt) {
 /* ═════════════ 로비: 3D 캐릭터 미리보기 / 탭 / 언어 / 방장 모드 ═════════════ */
 function renderEmotes() {
   const box = $('x-emotes');
-  if (box) box.innerHTML = EMOTES.map((e, i) => `<div><b>${i + 1}</b> ${e.icon} ${esc(t('em_' + e.id))}</div>`).join('');
+  if (box) {
+    box.innerHTML = EMOTES.map((e, i) => `<div><b>${i + 1}</b> ${e.icon} ${esc(t('em_' + e.id))}</div>`).join('');
+    box.querySelectorAll('div').forEach((d, i) => { d.style.cursor = 'pointer'; d.onclick = () => { openEmoteList(false); sendEmote(i); }; }); // 터치/클릭으로 선택
+  }
 }
 let pv = null;
 function initPreview() {
@@ -2048,6 +2057,126 @@ onLang(() => { fillRoomForm(); refreshRooms(); });
 applyI18n();
 initPreview();
 setPreviewClass(selectedCls);
+
+/* ═════════════ 모바일 터치 조작 (가로 모드 · 작은 버튼) ═════════════
+   왼쪽: 떠다니는 조이스틱(끝까지 밀면 달리기) / 오른쪽 빈 곳: 드래그로 시점 / 오른쪽 아래: 공격·방어·점프·Q·E / 오른쪽 위: 메뉴·채팅·이모트·점수판
+   버튼 위치·크기는 아래 BTN 표에서 바꿀 수 있습니다. (나중에 사용자 설정 화면으로 확장 가능) */
+function openTouchMenu() {
+  if (!joined) return;
+  touchPaused = true;
+  resetInput();
+  showView('main');
+  refreshMenu();
+}
+const BTN = {
+  attack: { label: '⚔', size: 54, right: 20, bottom: 62 },
+  block:  { label: '🛡', size: 44, right: 88, bottom: 28 },
+  jump:   { label: '⤒', size: 40, right: 22, bottom: 128 },
+  skill:  { label: 'Q', size: 40, right: 92, bottom: 86 },
+  kick:   { label: 'E', size: 36, right: 148, bottom: 44 },
+  menu:   { label: '☰', size: 34, right: 8, top: 8 },
+  chat:   { label: '💬', size: 34, right: 8, top: 48 },
+  emote:  { label: '😀', size: 34, right: 8, top: 88 },
+  score:  { label: '📋', size: 34, right: 8, top: 128 },
+};
+function initTouch() {
+  const st = document.createElement('style');
+  st.textContent = `
+  #tc{position:fixed;inset:0;z-index:8;display:none;pointer-events:none;touch-action:none}
+  #tc .zone{position:absolute;pointer-events:auto;touch-action:none}
+  #tc .b{position:absolute;pointer-events:auto;touch-action:none;display:flex;align-items:center;justify-content:center;border-radius:50%;
+    background:rgba(20,28,44,.5);border:2px solid rgba(255,255,255,.55);color:#fff;font:700 14px var(--px);user-select:none;-webkit-user-select:none}
+  #tc .b.on{background:rgba(77,178,255,.7)}
+  #tj-base{position:absolute;width:104px;height:104px;margin:-52px 0 0 -52px;border-radius:50%;border:2px solid rgba(255,255,255,.4);background:rgba(255,255,255,.08);display:none;pointer-events:none}
+  #tj-knob{position:absolute;width:42px;height:42px;margin:-21px 0 0 -21px;border-radius:50%;background:rgba(255,255,255,.5);display:none;pointer-events:none}`;
+  document.head.appendChild(st);
+  const tc = document.createElement('div');
+  tc.id = 'tc';
+  document.body.appendChild(tc);
+
+  // 시점: 오른쪽 넓은 영역 드래그
+  const look = document.createElement('div');
+  look.className = 'zone';
+  look.style.cssText = 'right:0;top:0;width:62%;height:100%';
+  tc.appendChild(look);
+  let lookId = null, lx = 0, ly = 0;
+  look.addEventListener('pointerdown', (e) => { e.preventDefault(); look.setPointerCapture?.(e.pointerId); lookId = e.pointerId; lx = e.clientX; ly = e.clientY; });
+  look.addEventListener('pointermove', (e) => {
+    if (e.pointerId !== lookId || !me.alive) return;
+    const k = 0.0042 * S.sens;
+    me.yaw -= (e.clientX - lx) * k;
+    me.pitch = clamp(me.pitch - (e.clientY - ly) * k, -1.45, 1.45);
+    lx = e.clientX; ly = e.clientY;
+  });
+  const endLook = (e) => { if (e.pointerId === lookId) lookId = null; };
+  look.addEventListener('pointerup', endLook);
+  look.addEventListener('pointercancel', endLook);
+
+  // 이동: 왼쪽 아래 떠다니는 조이스틱
+  const zone = document.createElement('div');
+  zone.className = 'zone';
+  zone.style.cssText = 'left:0;bottom:0;width:38%;height:75%';
+  tc.appendChild(zone);
+  const base = document.createElement('div'); base.id = 'tj-base'; tc.appendChild(base);
+  const knob = document.createElement('div'); knob.id = 'tj-knob'; tc.appendChild(knob);
+  let jId = null, jx = 0, jy = 0;
+  const R = 52;
+  const setKeys = (vx, vy, full) => {
+    keys.KeyD = vx > 0.3; keys.KeyA = vx < -0.3; keys.KeyS = vy > 0.3; keys.KeyW = vy < -0.3;
+    keys.ShiftLeft = full && vy < -0.5; // 끝까지 앞으로 밀면 달리기
+  };
+  zone.addEventListener('pointerdown', (e) => {
+    e.preventDefault(); zone.setPointerCapture?.(e.pointerId);
+    jId = e.pointerId; jx = e.clientX; jy = e.clientY;
+    for (const el of [base, knob]) { el.style.display = 'block'; el.style.left = jx + 'px'; el.style.top = jy + 'px'; }
+  });
+  zone.addEventListener('pointermove', (e) => {
+    if (e.pointerId !== jId) return;
+    let dx = e.clientX - jx, dy = e.clientY - jy;
+    const d = Math.hypot(dx, dy), full = d >= R;
+    if (d > R) { dx *= R / d; dy *= R / d; }
+    knob.style.left = jx + dx + 'px'; knob.style.top = jy + dy + 'px';
+    setKeys(dx / R, dy / R, full);
+  });
+  const endJoy = (e) => {
+    if (e.pointerId !== jId) return;
+    jId = null; base.style.display = knob.style.display = 'none';
+    setKeys(0, 0, false);
+  };
+  zone.addEventListener('pointerup', endJoy);
+  zone.addEventListener('pointercancel', endJoy);
+
+  // 버튼
+  const mkb = (def, down, up) => {
+    const b = document.createElement('div');
+    b.className = 'b';
+    b.textContent = def.label;
+    const pos = ['right', 'bottom', 'top', 'left'].filter((k) => def[k] != null).map((k) => `${k}:${def[k]}px`).join(';');
+    b.style.cssText = `${pos};width:${def.size}px;height:${def.size}px`;
+    tc.appendChild(b);
+    b.addEventListener('pointerdown', (e) => { e.preventDefault(); b.setPointerCapture?.(e.pointerId); b.classList.add('on'); down?.(); });
+    const end = () => { if (!b.classList.contains('on')) return; b.classList.remove('on'); up?.(); };
+    b.addEventListener('pointerup', end);
+    b.addEventListener('pointercancel', end);
+    return b;
+  };
+  let atkIv = 0;
+  mkb(BTN.attack, () => { tryAttack(); atkIv = setInterval(tryAttack, 90); }, () => clearInterval(atkIv)); // 누르고 있으면 연속 공격
+  mkb(BTN.block, () => { mouseR = true; }, () => { mouseR = false; });                                    // 누르는 순간 = 패링 타이밍
+  mkb(BTN.jump, () => { keys.Space = true; }, () => { keys.Space = false; });
+  mkb(BTN.skill, () => useSkill('q'));
+  mkb(BTN.kick, () => useSkill('e'));
+  mkb(BTN.menu, () => openTouchMenu());
+  mkb(BTN.chat, () => openChat(false));
+  mkb(BTN.emote, () => openEmoteList(true));
+  mkb(BTN.score, () => { const b = $('board'); b.style.display = b.style.display === 'block' ? 'none' : 'block'; });
+
+  // 채팅 입력창 바깥을 누르면 닫기 (모바일 키보드는 Esc가 없으므로)
+  $('x-chatin').addEventListener('blur', () => setTimeout(() => { if (chatOpen) closeChat(); }, 200));
+  // 조작 UI는 게임 중에만 표시
+  setInterval(() => { tc.style.display = joined && !touchPaused && !chatOpen && !matchInfo.over ? 'block' : 'none'; }, 150);
+}
+if (IS_TOUCH) initTouch();
 
 /* ═════════════ 메인 루프 ═════════════ */
 const clock = new THREE.Clock();

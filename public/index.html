@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>IRON OATH</title>
 <!-- 픽셀 폰트: Press Start 2P(영문 제목) · Galmuri11(한글/일본어 일부) · DotGothic16(일본어). 불러오지 못하면 시스템 글꼴로 대체됩니다 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -187,6 +189,21 @@
   .mpanel h2 { font: 20px var(--px); letter-spacing: 1px; color: var(--gold); text-shadow: 3px 3px 0 #000; }
   .mpanel .hint, .setrow, table.keys { font-family: var(--font); }
   .card, .slot, #hpbar, #stbar, #board, #minimap, #toast, #feed div, #status div { border-radius: 0 !important; }
+  /* ───── 모바일 ───── */
+  html, body { overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+  #c, #hud { touch-action: none; }
+  #rotate { display: none; position: fixed; inset: 0; z-index: 100; align-items: center; justify-content: center; text-align: center; padding: 30px; background: #0b0e14; color: #fff; font: 16px/1.6 var(--font); }
+  @media (orientation: portrait) and (pointer: coarse) { #rotate { display: flex; } }
+  @media (pointer: coarse), (max-height: 520px) {
+    #lobby { overflow: auto; touch-action: pan-y; }
+    #topbar { padding: 6px 12px; gap: 10px; } #logo { font-size: 14px; }
+    #nav button { padding: 8px 10px; font-size: 9px; }
+    #lobmain { padding: 10px 12px; gap: 12px; } #hero { font-size: 24px; } .box { padding: 12px; }
+    #pvcol { width: 34vw; } #pv { height: min(200px, 34vh); }
+    .cards { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+    .btn { padding: 10px 18px; font-size: 12px; }
+    #menu .mpanel { max-height: 94vh; overflow: auto; padding: 12px; }
+  }
 </style>
 <script type="importmap">{ "imports": { "three": "/three/build/three.module.js" } }</script>
 </head>
@@ -359,6 +376,7 @@
   </div>
 </div>
 
+<div id="rotate" data-i18n="rotate"></div>
 <script type="module" src="/auth.js"></script>
 <script type="module" src="/game.js"></script>
 </body>

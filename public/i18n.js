@@ -154,6 +154,8 @@ const UI = {
   err_noroom: ['That room no longer exists.', '그 방은 사라졌어요.', 'そのルームは存在しません。', '该房间已不存在。', 'Esa sala ya no existe.'],
   err_badpass: ['Wrong password.', '비밀번호가 틀렸어요.', 'パスワードが違います。', '密码错误。', 'Contraseña incorrecta.'],
   err_toomanyrooms: ['Too many rooms. Try again later.', '방이 너무 많아요. 잠시 후 다시 시도해 주세요.', 'ルームが多すぎます。後でもう一度。', '房间太多,请稍后再试。', 'Demasiadas salas. Inténtalo luego.'],
+  rotate: ['Please rotate your device to landscape.', '기기를 가로 모드로 돌려 주세요.', '端末を横向きにしてください。', '请将设备横屏。', 'Gira el dispositivo a horizontal.'],
+  vote_tap: ['Tap a button to vote.', '버튼을 눌러 투표하세요.', 'ボタンをタップして投票。', '点按按钮投票。', 'Toca un botón para votar.'],
   em_wave: ['Wave', '손 흔들기', '手を振る', '挥手', 'Saludar'],
   em_bow: ['Bow', '인사', 'お辞儀', '鞠躬', 'Reverencia'],
   em_cheer: ['Cheer', '환호', '歓声', '欢呼', 'Vitorear'],
