@@ -1,6 +1,7 @@
 // IRON OATH 게임 서버
+// - 방(Room) 단위로 게임이 따로 돌아갑니다. 공개 방은 판이 끝나면 투표로 다음 모드·맵을 정하고,
+//   "방 만들기"로 만든 방은 방장이 직접 모드·맵을 고릅니다.
 // - 명중 판정, 체력, 쿨다운, 스킬, 패링, 기절, 부활, 승패는 모두 서버가 결정합니다(치팅 방지).
-// - 이동은 클라이언트가 보내되, 서버가 속도/경계를 검사합니다.
 // - 로그인(Supabase)은 선택: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY 가 있으면 전적이 DB에 저장됩니다.
 
 import http from 'http';
@@ -11,30 +12,27 @@ import zlib from 'zlib';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import {
-  CLASSES, SKILLS, ARENA, PLAYER, TEAMS, MATCH, CHAT, EMOTES, EMOTE_GAP_MS,
+  CLASSES, SKILLS, MAPS, PLAYER, MATCH, ROOM, CHAT, EMOTES, EMOTE_GAP_MS,
   resolveCollision, lineBlocked,
 } from './classes.js';
 import { dbEnabled, verifyUser, recordMatch } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
-const MAX_PLAYERS = Number(process.env.MAX_PLAYERS) || 16;
+const MAX_PLAYERS = Number(process.env.MAX_PLAYERS) || 16; // 공개 방 정원
+const PUBLIC_ROOMS = Math.max(1, Number(process.env.PUBLIC_ROOMS) || 1);
+const DEFAULT_MODE = process.env.MODE === 'tdm' ? 'tdm' : 'ffa';
 const MOVE_CHECK = process.env.NO_MOVE_CHECK !== '1';
 const REQUIRE_LOGIN = process.env.REQUIRE_LOGIN === '1';
 const TICK_MS = 50;
 const MOVE_SLACK = 2.6;
 const EMOTE_IDS = new Set(EMOTES.map((e) => e.id));
+const MODES = ['ffa', 'tdm'];
 
 /* ───────────── 정적 파일 서버 ───────────── */
 const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.png': 'image/png',
-  '.svg': 'image/svg+xml',
-  '.ico': 'image/x-icon',
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
 };
 const gzCache = new Map();
 
@@ -50,10 +48,7 @@ function sendFile(req, res, file) {
     if (compressible && /\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
       const key = `${file}:${st.mtimeMs}`;
       let buf = gzCache.get(key);
-      if (!buf) {
-        buf = zlib.gzipSync(fs.readFileSync(file));
-        gzCache.set(key, buf);
-      }
+      if (!buf) { buf = zlib.gzipSync(fs.readFileSync(file)); gzCache.set(key, buf); }
       res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip', 'Content-Length': buf.length, Vary: 'Accept-Encoding' });
       return res.end(buf);
     }
@@ -63,20 +58,15 @@ function sendFile(req, res, file) {
 }
 
 const httpServer = http.createServer((req, res) => {
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    res.writeHead(405);
-    return res.end();
-  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); return res.end(); }
   let url;
-  try {
-    url = decodeURIComponent(new URL(req.url, 'http://x').pathname);
-  } catch {
-    res.writeHead(400);
-    return res.end();
-  }
+  try { url = decodeURIComponent(new URL(req.url, 'http://x').pathname); } catch { res.writeHead(400); return res.end(); }
   if (url === '/') url = '/index.html';
   if (url === '/classes.js') return sendFile(req, res, path.join(__dirname, 'classes.js'));
-  // 클라이언트가 로그인 설정(공개 키만)을 받아가는 곳. service role 키는 절대 노출하지 않습니다.
+  if (url === '/rooms.json') {
+    res.writeHead(200, { 'Content-Type': MIME['.json'], 'Cache-Control': 'no-cache' });
+    return res.end(JSON.stringify({ list: [...rooms.values()].map((r) => r.info()), maps: Object.values(MAPS).map((x) => ({ id: x.id })) }));
+  }
   if (url === '/config.json') {
     res.writeHead(200, { 'Content-Type': MIME['.json'], 'Cache-Control': 'no-cache' });
     return res.end(JSON.stringify({
@@ -85,7 +75,6 @@ const httpServer = http.createServer((req, res) => {
       requireLogin: REQUIRE_LOGIN,
     }));
   }
-
   let base = path.join(__dirname, 'public');
   let rel = url;
   if (url.startsWith('/three/build/')) {
@@ -93,268 +82,334 @@ const httpServer = http.createServer((req, res) => {
     rel = url.slice('/three/build'.length);
   }
   const file = path.join(base, path.normalize(rel));
-  if (!file.startsWith(base + path.sep)) {
-    res.writeHead(403);
-    return res.end();
-  }
+  if (!file.startsWith(base + path.sep)) { res.writeHead(403); return res.end(); }
   sendFile(req, res, file);
 });
 
 const wss = new WebSocketServer({ server: httpServer, maxPayload: 4096 });
 
-/* ───────────── 게임 상태 ───────────── */
-const players = new Map();
-let nextId = 1;
+/* ───────────── 공용 도우미 ───────────── */
 const now = () => Date.now();
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-
-const match = {
-  mode: process.env.MODE === 'tdm' ? 'tdm' : 'ffa', // ffa 개인전 / tdm 팀전
-  teamScore: { 1: 0, 2: 0 },
-  over: false,
-  startedAt: now(),
-};
-const killLimit = () => (match.mode === 'tdm' ? MATCH.teamKills : MATCH.ffaKills);
-const isFoe = (a, b) => match.mode === 'ffa' || a.team !== b.team;
-const hostId = () => Math.min(...players.keys());
-
-function send(ws, msg) {
-  if (ws.readyState === 1) ws.send(JSON.stringify(msg));
-}
-function broadcast(msg) {
-  const s = JSON.stringify(msg);
-  for (const p of players.values()) if (p.ws.readyState === 1) p.ws.send(s);
-}
-function roster() {
-  return [...players.values()].map((p) => ({
-    id: p.id, name: p.name, cls: p.cls, team: p.team, kills: p.kills, deaths: p.deaths, user: !!p.userId,
-  }));
-}
-function matchState() {
-  return {
-    t: 'match', mode: match.mode, limit: killLimit(), teamScore: match.teamScore,
-    over: match.over, hostId: players.size ? hostId() : null,
-  };
-}
-function assignTeam() {
-  if (match.mode === 'ffa') return 0;
-  let a = 0, b = 0;
-  for (const p of players.values()) { if (p.team === 1) a++; else if (p.team === 2) b++; }
-  return a <= b ? 1 : 2;
-}
-function spawnFor(p) {
-  const pool = match.mode === 'tdm' ? ARENA.spawns.filter((s) => s.team === p.team) : ARENA.spawns;
-  const s = pool[Math.floor(Math.random() * pool.length)];
-  const x = s.x + (Math.random() - 0.5) * 2;
-  const z = s.z + (Math.random() - 0.5) * 3;
-  return { x, y: 0, z, yaw: Math.atan2(x, z) }; // 중앙을 바라보게
-}
+const cleanText = (v, n) => String(v ?? '').replace(/[\u0000-\u001f<>&"'`]/g, '').trim().slice(0, n);
+const send = (ws, msg) => { if (ws.readyState === 1) ws.send(JSON.stringify(msg)); };
 const isStunned = (p) => p.stunUntil > now();
 const dmgMult = (p) => (p.buffUntil > now() ? p.buffDmg : 1);
 
+/* ───────────── 방 ───────────── */
+const rooms = new Map();
+let nextRoomId = 1;
+let nextId = 1;
+
+class Room {
+  constructor({ name, custom, max, mode, mapId, password }) {
+    this.id = `r${nextRoomId++}`;
+    this.name = name;
+    this.custom = !!custom;       // true: 방장이 설정을 정하는 방 / false: 공개 방(투표)
+    this.max = max;
+    this.password = password || '';
+    this.mode = mode;
+    this.hostId = null;
+    this.players = new Map();
+    this.teamScore = { 1: 0, 2: 0 };
+    this.over = false;
+    this.vote = null;
+    this.timers = new Set();
+    this.setMap(mapId);
+    this.endsAt = now() + MATCH.durationMs;
+  }
+  setMap(id) { this.mapId = MAPS[id] ? id : 'town'; this.map = MAPS[this.mapId]; }
+  later(fn, ms) {
+    const h = setTimeout(() => { this.timers.delete(h); fn(); }, ms);
+    this.timers.add(h);
+    return h;
+  }
+  destroy() { for (const h of this.timers) clearTimeout(h); this.timers.clear(); rooms.delete(this.id); }
+  broadcast(msg) {
+    const s = JSON.stringify(msg);
+    for (const p of this.players.values()) if (p.ws.readyState === 1) p.ws.send(s);
+  }
+  get limit() { return this.mode === 'tdm' ? MATCH.teamKills : MATCH.ffaKills; }
+  isFoe(a, b) { return this.mode === 'ffa' || a.team !== b.team; }
+  roster() {
+    return [...this.players.values()].map((p) => ({ id: p.id, name: p.name, cls: p.cls, team: p.team, kills: p.kills, deaths: p.deaths, user: !!p.userId }));
+  }
+  matchState() {
+    return {
+      t: 'match', mode: this.mode, map: this.mapId, limit: this.limit, teamScore: this.teamScore, over: this.over,
+      hostId: this.custom ? this.hostId : null, custom: this.custom, room: this.name,
+      remainMs: this.over ? 0 : Math.max(0, this.endsAt - now()), durationMs: MATCH.durationMs,
+    };
+  }
+  info() {
+    return { id: this.id, name: this.name, custom: this.custom, mode: this.mode, map: this.mapId, count: this.players.size, max: this.max, locked: !!this.password };
+  }
+  assignTeam() {
+    if (this.mode === 'ffa') return 0;
+    let a = 0, b = 0;
+    for (const p of this.players.values()) { if (p.team === 1) a++; else if (p.team === 2) b++; }
+    return a <= b ? 1 : 2;
+  }
+  spawnFor(p) {
+    const sps = this.map.spawns;
+    const pool = this.mode === 'tdm' ? sps.filter((s) => s.team === p.team) : sps;
+    const s = pool[Math.floor(Math.random() * pool.length)];
+    const x = s.x + (Math.random() - 0.5) * 2;
+    const z = s.z + (Math.random() - 0.5) * 2;
+    return { x, y: 0, z, yaw: Math.atan2(x, z) };
+  }
+  refreshHost() {
+    if (!this.custom) return;
+    if (!this.players.has(this.hostId)) this.hostId = this.players.size ? Math.min(...this.players.keys()) : null;
+  }
+  allyTargets(p, radius) {
+    const list = [p];
+    if (this.mode === 'tdm' && radius) {
+      for (const q of this.players.values()) {
+        if (q !== p && q.alive && q.team === p.team && Math.hypot(q.x - p.x, q.z - p.z) <= radius) list.push(q);
+      }
+    }
+    return list;
+  }
+
+  /* ── 판 진행 ── */
+  resetMatch() {
+    this.teamScore = { 1: 0, 2: 0 };
+    this.over = false;
+    this.vote = null;
+    this.endsAt = now() + MATCH.durationMs;
+    for (const p of this.players.values()) {
+      p.kills = 0; p.deaths = 0;
+      respawn(this, p.id, true);
+    }
+    this.broadcast({ t: 'roster', list: this.roster() });
+    this.broadcast(this.matchState());
+  }
+  // 모드/맵을 바꾸고 새 판 시작 (팀전이면 팀 균등 재배정)
+  startNewMatch(mode, mapId) {
+    if (mode) this.mode = mode;
+    if (mapId) this.setMap(mapId);
+    let i = 0;
+    for (const p of this.players.values()) p.team = this.mode === 'tdm' ? (i++ % 2) + 1 : 0;
+    this.resetMatch();
+  }
+  endMatch(winnerPlayer, winnerTeam, draw) {
+    if (this.over) return;
+    this.over = true;
+    const board = this.roster().sort((a, b) => b.kills - a.kills);
+    const nextMs = this.custom ? MATCH.customRestartMs : MATCH.voteMs + MATCH.resultMs;
+    this.broadcast({
+      t: 'matchend', mode: this.mode, map: this.mapId, winnerId: winnerPlayer?.id ?? null, winnerTeam: winnerTeam ?? null,
+      draw: !!draw, teamScore: this.teamScore, board, nextMs,
+    });
+    this.broadcast(this.matchState());
+    recordMatch({
+      mode: this.mode, winner_team: winnerTeam ?? null,
+      rows: [...this.players.values()].map((p) => ({
+        user_id: p.userId || null, name: p.name, class_id: p.cls, team: p.team, kills: p.kills, deaths: p.deaths,
+        won: !draw && (this.mode === 'tdm' ? p.team === winnerTeam : p.id === winnerPlayer?.id),
+      })),
+    });
+    if (this.custom) this.later(() => this.startNewMatch(), MATCH.customRestartMs);
+    else this.startVote();
+  }
+  // 시간 종료: 가장 많이 처치한 사람/팀이 승리, 같으면 무승부
+  timeUp() {
+    if (this.mode === 'tdm') {
+      const a = this.teamScore[1], b = this.teamScore[2];
+      return a === b ? this.endMatch(null, null, true) : this.endMatch(null, a > b ? 1 : 2, false);
+    }
+    const sorted = [...this.players.values()].sort((x, y) => y.kills - x.kills);
+    if (!sorted.length || sorted[0].kills === 0 || (sorted[1] && sorted[1].kills === sorted[0].kills)) return this.endMatch(null, null, true);
+    return this.endMatch(sorted[0], null, false);
+  }
+
+  /* ── 투표 (공개 방) ── */
+  startVote() {
+    this.vote = { endsAt: now() + MATCH.voteMs, votes: new Map() };
+    this.broadcast({ t: 'votestart', modes: MODES, maps: MATCH.votableMaps, ms: MATCH.voteMs, mode: this.mode, map: this.mapId });
+    this.later(() => this.finishVote(), MATCH.voteMs);
+  }
+  voteCounts() {
+    const mode = Object.fromEntries(MODES.map((m) => [m, 0]));
+    const map = Object.fromEntries(MATCH.votableMaps.map((m) => [m, 0]));
+    for (const v of this.vote.votes.values()) {
+      if (v.mode in mode) mode[v.mode]++;
+      if (v.map in map) map[v.map]++;
+    }
+    return { mode, map };
+  }
+  castVote(p, m) {
+    if (!this.vote || this.vote.done || this.vote.endsAt < now()) return;
+    const v = this.vote.votes.get(p.id) || {};
+    if (MODES.includes(m.mode)) v.mode = m.mode;
+    if (MATCH.votableMaps.includes(m.map)) v.map = m.map;
+    this.vote.votes.set(p.id, v);
+    this.broadcast({ t: 'votestatus', ...this.voteCounts() });
+  }
+  finishVote() {
+    if (!this.vote || this.vote.done) return;
+    const pickTop = (counts, current) => {
+      const max = Math.max(0, ...Object.values(counts));
+      if (max === 0) return current; // 아무도 투표하지 않으면 현재 설정 유지
+      const top = Object.keys(counts).filter((k) => counts[k] === max);
+      return top[Math.floor(Math.random() * top.length)];
+    };
+    const c = this.voteCounts();
+    const mode = pickTop(c.mode, this.mode);
+    const map = pickTop(c.map, MATCH.votableMaps.includes(this.mapId) ? this.mapId : MATCH.votableMaps[0]);
+    this.vote.done = true;
+    this.broadcast({ t: 'voteend', mode, map, counts: c, ms: MATCH.resultMs });
+    this.later(() => this.startNewMatch(mode, map), MATCH.resultMs);
+  }
+}
+
+for (let i = 1; i <= PUBLIC_ROOMS; i++) {
+  const r = new Room({ name: `Arena ${i}`, custom: false, max: MAX_PLAYERS, mode: DEFAULT_MODE, mapId: 'town' });
+  rooms.set(r.id, r);
+}
+
+/* ───────────── 전투 ───────────── */
 function push(q, nx, nz, dist) {
-  [q.x, q.z] = resolveCollision(q.x + nx * dist, q.z + nz * dist);
+  [q.x, q.z] = resolveCollision(q.x + nx * dist, q.z + nz * dist, PLAYER.radius, q.room.map);
   send(q.ws, { t: 'correct', x: q.x, y: q.y, z: q.z });
 }
 function stun(q, ms) {
   q.stunUntil = Math.max(q.stunUntil, now() + ms);
   q.blocking = false;
-  broadcast({ t: 'stun', id: q.id, ms });
+  q.room.broadcast({ t: 'stun', id: q.id, ms });
 }
 function heal(q, amt) {
-  const max = CLASSES[q.cls].hp;
   const before = q.hp;
-  q.hp = Math.min(max, q.hp + amt);
-  if (q.hp > before) broadcast({ t: 'heal', id: q.id, amt: Math.round(q.hp - before), hp: q.hp });
-}
-// 스킬 대상: 본인 + (팀전이고 radius가 있으면) 반경 내 아군
-function allyTargets(p, radius) {
-  const list = [p];
-  if (match.mode === 'tdm' && radius) {
-    for (const q of players.values()) {
-      if (q !== p && q.alive && q.team === p.team && Math.hypot(q.x - p.x, q.z - p.z) <= radius) list.push(q);
-    }
-  }
-  return list;
-}
-
-/* ───────────── 매치 진행 ───────────── */
-function resetMatch() {
-  match.teamScore = { 1: 0, 2: 0 };
-  match.over = false;
-  match.startedAt = now();
-  for (const p of players.values()) {
-    p.kills = 0;
-    p.deaths = 0;
-    respawn(p.id, true);
-  }
-  broadcast({ t: 'roster', list: roster() });
-  broadcast(matchState());
-}
-
-function endMatch(winnerPlayer, winnerTeam) {
-  if (match.over) return;
-  match.over = true;
-  const board = roster().sort((a, b) => b.kills - a.kills);
-  broadcast({
-    t: 'matchend', mode: match.mode, winnerId: winnerPlayer?.id ?? null, winnerTeam: winnerTeam ?? null,
-    teamScore: match.teamScore, board, nextMs: MATCH.intermissionMs,
-  });
-  broadcast(matchState());
-  // 로그인한 플레이어의 전적을 DB에 저장
-  recordMatch({
-    mode: match.mode,
-    winner_team: winnerTeam ?? null,
-    rows: [...players.values()].map((p) => ({
-      user_id: p.userId || null, name: p.name, class_id: p.cls, team: p.team,
-      kills: p.kills, deaths: p.deaths,
-      won: match.mode === 'tdm' ? p.team === winnerTeam : p.id === winnerPlayer?.id,
-    })),
-  });
-  setTimeout(resetMatch, MATCH.intermissionMs);
+  q.hp = Math.min(CLASSES[q.cls].hp, q.hp + amt);
+  if (q.hp > before) q.room.broadcast({ t: 'heal', id: q.id, amt: Math.round(q.hp - before), hp: q.hp });
 }
 
 function kill(p, q) {
-  q.alive = false;
-  q.blocking = false;
-  q.stunUntil = 0;
-  q.buffUntil = 0;
-  q.deaths++;
-  p.kills++;
-  if (match.mode === 'tdm') match.teamScore[p.team]++;
-  broadcast({ t: 'kill', killer: p.id, victim: q.id });
-  broadcast({ t: 'roster', list: roster() });
-  broadcast(matchState());
-  setTimeout(() => respawn(q.id), PLAYER.respawnMs);
-  if (match.mode === 'tdm' ? match.teamScore[p.team] >= killLimit() : p.kills >= killLimit()) {
-    endMatch(p, match.mode === 'tdm' ? p.team : null);
+  const rm = p.room;
+  q.alive = false; q.blocking = false; q.stunUntil = 0; q.buffUntil = 0;
+  q.deaths++; p.kills++;
+  if (rm.mode === 'tdm') rm.teamScore[p.team]++;
+  rm.broadcast({ t: 'kill', killer: p.id, victim: q.id });
+  rm.broadcast({ t: 'roster', list: rm.roster() });
+  rm.broadcast(rm.matchState());
+  rm.later(() => respawn(rm, q.id), PLAYER.respawnMs);
+  if (rm.mode === 'tdm' ? rm.teamScore[p.team] >= rm.limit : p.kills >= rm.limit) {
+    rm.endMatch(rm.mode === 'tdm' ? null : p, rm.mode === 'tdm' ? p.team : null, false);
   }
 }
 
-/* ───────────── 공격 판정 ─────────────
-   o: { reach, cos, dmg, skill, ignoreBlock, knock, stun, lifesteal, selfHeal, counter, ranged } */
+// o: { reach, cos, dmg, skill, ignoreBlock, knock, stun, lifesteal, selfHeal, counter, ranged, multi }
 function strike(p, o) {
-  if (!p.alive || match.over) return;
+  const rm = p.room;
+  if (!rm || !p.alive || rm.over) return;
   const c = CLASSES[p.cls];
-  const fx = -Math.sin(p.yaw);
-  const fz = -Math.cos(p.yaw);
+  const fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);
   const t = now();
-
-  const cand = [...players.values()];
+  const cand = [...rm.players.values()];
   if (o.ranged) cand.sort((a, b) => Math.hypot(a.x - p.x, a.z - p.z) - Math.hypot(b.x - p.x, b.z - p.z));
+
   for (const q of cand) {
-    if (q === p || !q.alive || !isFoe(p, q)) continue;
-    const dx = q.x - p.x;
-    const dz = q.z - p.z;
+    if (q === p || !q.alive || !rm.isFoe(p, q)) continue;
+    const dx = q.x - p.x, dz = q.z - p.z;
     const dist = Math.hypot(dx, dz);
     if (dist > o.reach + PLAYER.radius) continue;
     if (Math.abs(q.y - p.y) > 1.8) continue;
     if (o.cos > -1 && dist > 0.6 && (dx * fx + dz * fz) / dist < o.cos) continue;
-    if (lineBlocked(p.x, p.z, q.x, q.z)) continue; // 건물·기둥 뒤는 맞지 않음
+    if (lineBlocked(p.x, p.z, q.x, q.z, rm.map)) continue;
 
     const qc = CLASSES[q.cls];
-    const tfx = -Math.sin(q.yaw);
-    const tfz = -Math.cos(q.yaw);
+    const tfx = -Math.sin(q.yaw), tfz = -Math.cos(q.yaw);
     const facing = dist > 0.01 ? (tfx * -dx + tfz * -dz) / dist : 1;
     const guarding = !o.ignoreBlock && q.blocking && facing > 0.3;
 
     // 패링: 방어를 막 올린 순간(parryMs 이내) 근접 공격을 받으면 피해 0, 공격자 기절, 반격 기회
     if (guarding && !o.ranged && t - q.blockSince <= PLAYER.parryMs) {
       q.counterUntil = t + PLAYER.counterWindowMs;
-      broadcast({ t: 'parry', id: q.id, by: p.id });
+      rm.broadcast({ t: 'parry', id: q.id, by: p.id });
       stun(p, PLAYER.parryStunMs);
       continue;
     }
 
-    let mult = 1;
-    let tag = null;
+    let mult = 1, tag = null;
     if (o.counter) { mult *= PLAYER.counterMult; tag = 'counter'; }
     if (c.backstab && dist > 0.01 && (tfx * dx + tfz * dz) / dist > 0.5) { mult *= c.backstab; tag = 'back'; }
     const dmg = Math.max(1, Math.round(o.dmg * mult * (guarding ? 1 - qc.block : 1)));
 
     q.hp = Math.max(0, q.hp - dmg);
-    broadcast({ t: 'hit', id: q.id, by: p.id, dmg, hp: q.hp, blocked: guarding, skill: o.skill || null, tag });
+    rm.broadcast({ t: 'hit', id: q.id, by: p.id, dmg, hp: q.hp, blocked: guarding, skill: o.skill || null, tag });
     if (o.lifesteal) heal(p, dmg * o.lifesteal);
     if (o.selfHeal) heal(p, o.selfHeal);
 
     if (q.hp > 0) {
       if (o.knock) {
-        const nx = dist > 0.01 ? dx / dist : fx;
-        const nz = dist > 0.01 ? dz / dist : fz;
+        const nx = dist > 0.01 ? dx / dist : fx, nz = dist > 0.01 ? dz / dist : fz;
         push(q, nx, nz, o.knock * (guarding ? 0.4 : 1));
       }
       if (o.stun && !guarding) stun(q, o.stun);
     } else {
       kill(p, q);
-      if (match.over) return;
+      if (rm.over) return;
     }
     if (o.ranged && !o.multi) break; // 투사체는 맨 처음 맞은 한 명에게서 멈춤
   }
 }
 
-function respawn(id, force = false) {
-  const q = players.get(id);
+function respawn(rm, id, force = false) {
+  const q = rm.players.get(id);
   if (!q || (!force && q.alive)) return;
   let changed = false;
-  if (q.nextCls && q.nextCls !== q.cls) {
-    q.cls = q.nextCls;
-    changed = true;
-  }
+  if (q.nextCls && q.nextCls !== q.cls) { q.cls = q.nextCls; changed = true; }
   q.nextCls = null;
-  const s = spawnFor(q);
+  const s = rm.spawnFor(q);
   Object.assign(q, {
     x: s.x, y: s.y, z: s.z, yaw: s.yaw, pitch: 0, hp: CLASSES[q.cls].hp,
     alive: true, blocking: false, blockSince: 0, stunUntil: 0, buffUntil: 0, buffDmg: 1, buffSpeed: 1,
     counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(),
   });
   q.lastState = now();
-  if (changed) broadcast({ t: 'roster', list: roster() });
-  broadcast({ t: 'respawn', id: q.id, cls: q.cls, x: s.x, y: s.y, z: s.z, yaw: s.yaw, hp: q.hp });
+  if (changed) rm.broadcast({ t: 'roster', list: rm.roster() });
+  rm.broadcast({ t: 'respawn', id: q.id, cls: q.cls, x: s.x, y: s.y, z: s.z, yaw: s.yaw, hp: q.hp });
 }
 
 function useSkill(p, slot) {
+  const rm = p.room;
   const c = CLASSES[p.cls];
   const id = slot === 'e' ? 'kick' : c.skill;
   const def = SKILLS[id];
   if (!def) return;
   const t = now();
   if (t < (p.cds[id] || 0) - 80) return;
-  // 발차기는 쿨타임이 없다. 연타 도배만 막는 최소 간격
   p.cds[id] = t + (id === 'kick' ? PLAYER.kickGapMs : def.cooldown * 1000);
   p.blocking = false;
-  broadcast({ t: 'skill', id: p.id, skill: id });
+  rm.broadcast({ t: 'skill', id: p.id, skill: id });
 
-  // 회복 / 버프 (공격이 없는 스킬)
   if (def.heal || def.dur) {
-    for (const q of allyTargets(p, def.radius)) {
+    for (const q of rm.allyTargets(p, def.radius)) {
       if (def.heal) heal(q, def.heal);
       if (def.dur) {
-        q.buffUntil = t + def.dur;
-        q.buffDmg = def.dmgMult || 1;
-        q.buffSpeed = def.speedMult || 1;
-        broadcast({ t: 'buff', id: q.id, ms: def.dur, dmg: q.buffDmg, speed: q.buffSpeed });
+        q.buffUntil = t + def.dur; q.buffDmg = def.dmgMult || 1; q.buffSpeed = def.speedMult || 1;
+        rm.broadcast({ t: 'buff', id: q.id, ms: def.dur, dmg: q.buffDmg, speed: q.buffSpeed });
       }
     }
     return;
   }
-
   if (def.dash) p.dashUntil = t + def.dash.dur * 1000 + 300;
   if (def.blink) {
     const fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);
     let bx = p.x, bz = p.z;
     for (let d = 0.5; d <= def.blink; d += 0.5) {
       const tx = p.x + fx * d, tz = p.z + fz * d;
-      const [rx, rz] = resolveCollision(tx, tz);
-      if (Math.hypot(rx - tx, rz - tz) > 0.05) break; // 벽에 막히면 거기까지
+      const [rx, rz] = resolveCollision(tx, tz, PLAYER.radius, rm.map);
+      if (Math.hypot(rx - tx, rz - tz) > 0.05) break;
       bx = rx; bz = rz;
     }
     p.x = bx; p.z = bz;
     send(p.ws, { t: 'correct', x: p.x, y: p.y, z: p.z });
   }
-
   const reach = def.reach ?? c.reach + (def.reachAdd || 0);
   const cos = def.cone >= 360 ? -2 : Math.cos((def.cone * Math.PI) / 180);
-  setTimeout(() => {
+  rm.later(() => {
     if (!p.alive) return;
     strike(p, {
       reach, cos, skill: id, ranged: reach > 6, multi: id === 'volley',
@@ -365,7 +420,58 @@ function useSkill(p, slot) {
   }, def.windup * 1000);
 }
 
-/* ───────────── 접속 처리 ───────────── */
+/* ───────────── 입장 / 방 관리 ───────────── */
+function sanitizeCreate(cr) {
+  const name = cleanText(cr?.name, ROOM.nameLen) || 'Custom Room';
+  const mode = MODES.includes(cr?.mode) ? cr.mode : 'ffa';
+  const mapId = MAPS[cr?.map] ? cr.map : 'town';
+  const max = clamp(Math.floor(Number(cr?.max) || 8), 2, ROOM.maxCustomPlayers);
+  const password = cleanText(cr?.password, ROOM.passLen);
+  return { name, mode, mapId, max, password };
+}
+
+function joinRoom(ws, user, m) {
+  let room;
+  if (m.create) {
+    if (rooms.size >= ROOM.maxRooms) return send(ws, { t: 'error', code: 'toomanyrooms' });
+    room = new Room({ ...sanitizeCreate(m.create), custom: true });
+    rooms.set(room.id, room);
+  } else if (m.room) {
+    room = rooms.get(String(m.room));
+    if (!room) return send(ws, { t: 'error', code: 'noroom' });
+    if (room.password && room.password !== cleanText(m.password, ROOM.passLen)) return send(ws, { t: 'error', code: 'badpass' });
+  } else {
+    // 방을 지정하지 않으면 자리가 있는 공개 방 중 사람이 가장 많은 곳
+    const open = [...rooms.values()].filter((r) => !r.custom && r.players.size < r.max).sort((a, b) => b.players.size - a.players.size);
+    room = open[0];
+  }
+  if (!room || room.players.size >= room.max) return send(ws, { t: 'full' });
+  if (user) for (const r of rooms.values()) for (const o of r.players.values()) if (o.userId === user.id) o.ws.close();
+
+  const id = nextId++;
+  const cls = CLASSES[m.cls] ? m.cls : 'knight';
+  const name = cleanText(m.name || user?.name, PLAYER.maxNameLen) || `Knight${id}`;
+  const p = {
+    id, ws, room, name, cls, team: room.assignTeam(), userId: user?.id || null, x: 0, y: 0, z: 0, yaw: 0, pitch: 0,
+    hp: CLASSES[cls].hp, alive: true, blocking: false, blockSince: 0, kills: 0, deaths: 0, lastAttack: 0,
+    lastState: now(), lastChat: 0, lastEmote: 0, stunUntil: 0, buffUntil: 0, buffDmg: 1, buffSpeed: 1,
+    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), nextCls: null,
+  };
+  Object.assign(p, room.spawnFor(p));
+  room.players.set(id, p);
+  ws.pid = id;
+  ws.room = room;
+  if (room.custom && room.hostId == null) room.hostId = id; // 방을 만든 사람이 방장
+  send(ws, {
+    t: 'welcome', id, cls, team: p.team, x: p.x, y: p.y, z: p.z, yaw: p.yaw, hp: p.hp,
+    roster: room.roster(), authed: !!user, db: dbEnabled, room: room.info(), map: room.mapId,
+  });
+  room.broadcast({ t: 'roster', list: room.roster() });
+  room.broadcast(room.matchState());
+  if (room.vote && !room.vote.done) send(ws, { t: 'votestart', modes: MODES, maps: MATCH.votableMaps, ms: Math.max(0, room.vote.endsAt - now()), mode: room.mode, map: room.mapId });
+  console.log(`[+] ${name} (${cls}${user ? ', 로그인' : ''}) → ${room.name} — ${room.players.size}명`);
+}
+
 wss.on('connection', (ws) => {
   ws.isAlive = true;
   ws.on('pong', () => (ws.isAlive = true));
@@ -376,44 +482,22 @@ wss.on('connection', (ws) => {
     if (!m || typeof m.t !== 'string') return;
 
     if (m.t === 'ping') return send(ws, { t: 'pong', ts: m.ts });
+    if (m.t === 'rooms') {
+      return send(ws, { t: 'roomlist', list: [...rooms.values()].map((r) => r.info()), maps: Object.values(MAPS).map((x) => ({ id: x.id, name: x.name })) });
+    }
 
     if (m.t === 'join') {
       if (ws.pid || ws.joining) return;
       ws.joining = true;
-      const user = await verifyUser(m.token); // 게스트/미설정이면 null
+      const user = await verifyUser(m.token);
       ws.joining = false;
       if (ws.readyState !== 1 || ws.pid) return;
       if (REQUIRE_LOGIN && !user) return send(ws, { t: 'authrequired' });
-      if (players.size >= MAX_PLAYERS) return send(ws, { t: 'full' });
-      // 같은 계정으로 중복 접속하면 이전 접속을 내보냄
-      if (user) for (const o of players.values()) if (o.userId === user.id) o.ws.close();
-
-      const id = nextId++;
-      const cls = CLASSES[m.cls] ? m.cls : 'knight';
-      const rawName = m.name || user?.name || '';
-      const name = String(rawName).replace(/[<>&"'`]/g, '').trim().slice(0, PLAYER.maxNameLen) || `Knight${id}`;
-      const team = assignTeam();
-      const p = {
-        id, ws, name, cls, team, userId: user?.id || null, x: 0, y: 0, z: 0, yaw: 0, pitch: 0,
-        hp: CLASSES[cls].hp, alive: true, blocking: false, blockSince: 0,
-        kills: 0, deaths: 0, lastAttack: 0, lastState: now(), lastChat: 0, lastEmote: 0,
-        stunUntil: 0, buffUntil: 0, buffDmg: 1, buffSpeed: 1, counterUntil: 0, dashUntil: 0,
-        cds: {}, spawnAt: now(), nextCls: null,
-      };
-      Object.assign(p, spawnFor(p));
-      players.set(id, p);
-      ws.pid = id;
-      send(ws, {
-        t: 'welcome', id, cls, team, x: p.x, y: p.y, z: p.z, yaw: p.yaw, hp: p.hp,
-        roster: roster(), authed: !!user, db: dbEnabled,
-      });
-      broadcast({ t: 'roster', list: roster() });
-      broadcast(matchState());
-      console.log(`[+] ${name} (${cls}${user ? ', 로그인' : ''}) 입장 — 현재 ${players.size}명`);
-      return;
+      return joinRoom(ws, user, m);
     }
 
-    const p = players.get(ws.pid);
+    const rm = ws.room;
+    const p = rm?.players.get(ws.pid);
     if (!p) return;
 
     if (m.t === 'state') {
@@ -425,96 +509,101 @@ wss.on('connection', (ws) => {
       p.lastState = t;
       let maxDist = CLASSES[p.cls].speed * MOVE_SLACK * dt + 0.6;
       if (p.dashUntil > t) maxDist += 22 * dt;
-      if (MOVE_CHECK && Math.hypot(x - p.x, z - p.z) > maxDist) {
-        return send(ws, { t: 'correct', x: p.x, y: p.y, z: p.z });
-      }
-      const [cx, cz] = resolveCollision(x, z);
-      p.x = cx;
-      p.z = cz;
+      if (MOVE_CHECK && Math.hypot(x - p.x, z - p.z) > maxDist) return send(ws, { t: 'correct', x: p.x, y: p.y, z: p.z });
+      [p.x, p.z] = resolveCollision(x, z, PLAYER.radius, rm.map);
       p.y = clamp(y, 0, 20);
       p.yaw = yaw;
       p.pitch = clamp(pitch, -1.6, 1.6);
       const wantBlock = !!m.b && !isStunned(p);
-      if (wantBlock && !p.blocking) p.blockSince = t; // 방어를 올린 순간 = 패링 윈도우 시작
+      if (wantBlock && !p.blocking) p.blockSince = t;
       p.blocking = wantBlock;
     } else if (m.t === 'attack') {
-      if (!p.alive || isStunned(p) || match.over) return;
+      if (!p.alive || isStunned(p) || rm.over) return;
       const c = CLASSES[p.cls];
       const t = now();
       if (t - p.lastAttack < c.cooldown * 1000 - 30) return;
       p.lastAttack = t;
       p.blocking = false;
-      broadcast({ t: 'swing', id: p.id });
-      const cos = Math.cos((((c.cone ?? 50)) * Math.PI) / 180);
-      setTimeout(() => {
-        // 패링 성공 직후의 첫 공격은 반격: 피해 증가 + 방어 무시
+      rm.broadcast({ t: 'swing', id: p.id });
+      const cos = Math.cos(((c.cone ?? 50) * Math.PI) / 180);
+      rm.later(() => {
         const counter = p.counterUntil > now();
         if (counter) p.counterUntil = 0;
-        strike(p, {
-          reach: c.reach, cos, ranged: !!c.ranged, counter, ignoreBlock: counter,
-          dmg: Math.round(c.damage * dmgMult(p)),
-        });
+        strike(p, { reach: c.reach, cos, ranged: !!c.ranged, counter, ignoreBlock: counter, dmg: Math.round(c.damage * dmgMult(p)) });
       }, c.windup * 1000);
     } else if (m.t === 'skill') {
-      if (!p.alive || isStunned(p) || match.over) return;
+      if (!p.alive || isStunned(p) || rm.over) return;
       if (m.slot !== 'q' && m.slot !== 'e') return;
       useSkill(p, m.slot);
     } else if (m.t === 'setclass') {
       if (!CLASSES[m.cls] || m.cls === p.cls) return;
       const inGrace = p.alive && now() - p.spawnAt < PLAYER.classSwapGraceMs;
       p.nextCls = m.cls;
-      if (inGrace) {
-        respawn(p.id, true);
-        send(ws, { t: 'classqueued', cls: m.cls, immediate: true });
-      } else {
-        send(ws, { t: 'classqueued', cls: m.cls, immediate: false });
-      }
+      if (inGrace) { respawn(rm, p.id, true); send(ws, { t: 'classqueued', cls: m.cls, immediate: true }); }
+      else send(ws, { t: 'classqueued', cls: m.cls, immediate: false });
     } else if (m.t === 'chat') {
       const t = now();
       if (t - p.lastChat < CHAT.gapMs) return;
       const text = String(m.text ?? '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, CHAT.maxLen);
       if (!text) return;
       p.lastChat = t;
-      const teamOnly = !!m.team && match.mode === 'tdm';
+      const teamOnly = !!m.team && rm.mode === 'tdm';
       const msg = { t: 'chat', id: p.id, name: p.name, team: p.team, text, teamOnly };
-      for (const q of players.values()) if (!teamOnly || q.team === p.team) send(q.ws, msg);
+      for (const q of rm.players.values()) if (!teamOnly || q.team === p.team) send(q.ws, msg);
     } else if (m.t === 'emote') {
       const t = now();
       if (!EMOTE_IDS.has(m.e) || t - p.lastEmote < EMOTE_GAP_MS) return;
       p.lastEmote = t;
-      broadcast({ t: 'emote', id: p.id, e: m.e });
-    } else if (m.t === 'setmode') {
-      // 방장(가장 먼저 들어온 사람)만 모드 변경 가능
-      if (p.id !== hostId() || (m.mode !== 'ffa' && m.mode !== 'tdm') || m.mode === match.mode) return;
-      match.mode = m.mode;
-      let i = 0;
-      for (const q of players.values()) q.team = match.mode === 'tdm' ? (i++ % 2) + 1 : 0;
-      resetMatch();
+      rm.broadcast({ t: 'emote', id: p.id, e: m.e });
+    } else if (m.t === 'vote') {
+      rm.castVote(p, m);
+    } else if (m.t === 'setmode' || m.t === 'setroom') {
+      // 방장 방에서만, 방장만 모드·맵을 바꿀 수 있음 (공개 방은 투표로만 바뀜)
+      if (!rm.custom || p.id !== rm.hostId) return;
+      const mode = MODES.includes(m.mode) ? m.mode : rm.mode;
+      const mapId = MAPS[m.map] ? m.map : rm.mapId;
+      if (mode === rm.mode && mapId === rm.mapId) return;
+      rm.startNewMatch(mode, mapId);
     }
   });
 
   ws.on('close', () => {
-    const p = players.get(ws.pid);
+    const rm = ws.room;
+    const p = rm?.players.get(ws.pid);
     if (!p) return;
-    players.delete(p.id);
-    broadcast({ t: 'roster', list: roster() });
-    if (players.size) broadcast(matchState());
-    console.log(`[-] ${p.name} 퇴장 — 현재 ${players.size}명`);
+    rm.players.delete(p.id);
+    if (rm.vote) rm.vote.votes.delete(p.id);
+    rm.refreshHost();
+    if (rm.custom && !rm.players.size) { rm.destroy(); console.log(`[x] 방 삭제: ${rm.name}`); }
+    else { rm.broadcast({ t: 'roster', list: rm.roster() }); rm.broadcast(rm.matchState()); }
+    console.log(`[-] ${p.name} 퇴장 (${rm.name}) — ${rm.players.size}명`);
   });
 });
 
-setInterval(() => {
-  if (!players.size) return;
-  broadcast({
-    t: 'snap',
-    p: [...players.values()].map((p) => ({
-      id: p.id,
-      x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3),
-      yaw: +p.yaw.toFixed(3), pitch: +p.pitch.toFixed(3),
-      b: p.blocking, hp: p.hp, alive: p.alive,
-    })),
-  });
+/* ───────────── 주기 작업 ───────────── */
+setInterval(() => { // 20Hz 스냅샷
+  for (const rm of rooms.values()) {
+    if (!rm.players.size) continue;
+    rm.broadcast({
+      t: 'snap',
+      p: [...rm.players.values()].map((p) => ({
+        id: p.id, x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3),
+        yaw: +p.yaw.toFixed(3), pitch: +p.pitch.toFixed(3), b: p.blocking, hp: p.hp, alive: p.alive,
+      })),
+    });
+  }
 }, TICK_MS);
+
+let tickCount = 0;
+setInterval(() => { // 0.25초마다 시간 종료 확인, 5초마다 남은 시간 동기화
+  tickCount++;
+  for (const rm of rooms.values()) {
+    if (rm.over) continue;
+    if (!rm.players.size) { rm.endsAt = now() + MATCH.durationMs; continue; } // 빈 방은 시간이 흐르지 않음
+    if (now() >= rm.endsAt) rm.timeUp();
+    else if (tickCount % 20 === 0) rm.broadcast(rm.matchState());
+  }
+}, 250);
 
 setInterval(() => {
   for (const ws of wss.clients) {
@@ -532,5 +621,5 @@ httpServer.listen(PORT, '0.0.0.0', () => {
       if (i.family === 'IPv4' && !i.internal) console.log(`   같은 와이파이/LAN: http://${i.address}:${PORT}`);
     }
   }
-  console.log(`   최대 인원: ${MAX_PLAYERS}명 / 모드: ${match.mode} / 로그인 DB: ${dbEnabled ? '켜짐' : '꺼짐(게스트만)'}\n`);
+  console.log(`   공개 방 ${PUBLIC_ROOMS}개 · 정원 ${MAX_PLAYERS}명 · 기본 모드 ${DEFAULT_MODE} · 한 판 ${MATCH.durationMs / 1000}초 · 로그인 DB: ${dbEnabled ? '켜짐' : '꺼짐(게스트만)'}\n`);
 });

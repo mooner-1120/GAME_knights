@@ -1,37 +1,69 @@
 // 서버와 클라이언트가 함께 쓰는 설정 파일입니다.
 // 기사(클래스)·스킬·맵·이모트를 추가하거나 능력치를 바꾸려면 여기만 고치면 됩니다.
 
-/* ───────────── 맵: 중세 마을 (96 x 96) ─────────────
-   - 중앙 광장(분수) + 십자 대로 + 4구역 건물군. 4방향 대칭이라 팀전에서도 공정합니다.
-   - pillars: 원형 장애물(분수, 통, 나무, 우물) / boxes: 건물·벽 (x,z 중심, w=x크기, d=z크기, h=높이)
-   - spawns: 레드 팀은 서문(왼쪽), 블루 팀은 동문(오른쪽). 개인전은 전부 사용 */
-const QUAD = [
-  { x: 14, z: 12, w: 10, d: 8, h: 6 },  // 여관
-  { x: 30, z: 10, w: 8, d: 12, h: 7 },  // 대장간
-  { x: 16, z: 28, w: 12, d: 8, h: 5 },  // 시장 창고
-  { x: 34, z: 32, w: 8, d: 8, h: 9 },   // 감시탑
-  { x: 6, z: 40, w: 6, d: 4, h: 4 },    // 헛간
-];
-const boxes = [];
-for (const [sx, sz] of [[1, 1], [-1, 1], [1, -1], [-1, -1]]) {
-  for (const b of QUAD) boxes.push({ x: b.x * sx, z: b.z * sz, w: b.w, d: b.d, h: b.h });
+/* ───────────── 맵 (4종) ─────────────
+   boxes: x,z 중심 / w=x크기, d=z크기, h=높이 / style: 'house'(지붕 있는 집) | 'stone'(석벽·탑·돌덩이)
+   pillars: 원형 장애물. kind: fountain | tree | well | barrel | column | dais
+   spawns: 팀전은 team 1(왼쪽)·2(오른쪽)이 각자 진영에서, 개인전은 전부 사용
+   모든 맵은 좌우 대칭이거나 같은 시드로 만들어져서 서버와 브라우저가 똑같은 맵을 얻습니다. */
+const SIGNS = [[1, 1], [-1, 1], [1, -1], [-1, -1]];
+const sp = (xe, zs) => [...zs.map((z) => ({ x: -xe, z, team: 1 })), ...zs.map((z) => ({ x: xe, z, team: 2 }))];
+function rng(seed) {
+  let a = seed;
+  return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 }
-const pillars = [{ x: 0, z: 0, r: 2.6, kind: 'fountain' }]; // 중앙 분수
-for (const [sx, sz] of [[1, 1], [-1, 1], [1, -1], [-1, -1]]) {
-  pillars.push({ x: 22 * sx, z: 22 * sz, r: 1.2, kind: 'tree' }); // 나무
-  pillars.push({ x: 40 * sx, z: 20 * sz, r: 1.4, kind: 'well' }); // 우물
-}
-for (const [x, z] of [[22, 0], [-22, 0], [0, 22], [0, -22]]) pillars.push({ x, z, r: 1.0, kind: 'barrel' }); // 통
 
-export const ARENA = {
-  half: 48,
-  pillars,
-  boxes,
-  spawns: [
-    { x: -42, z: -8, team: 1 }, { x: -42, z: 0, team: 1 }, { x: -42, z: 8, team: 1 }, { x: -44, z: 4, team: 1 },
-    { x: 42, z: -8, team: 2 }, { x: 42, z: 0, team: 2 }, { x: 42, z: 8, team: 2 }, { x: 44, z: 4, team: 2 },
-  ],
-};
+function makeTown() {
+  const Q = [
+    { x: 14, z: 12, w: 10, d: 8, h: 6 }, { x: 30, z: 10, w: 8, d: 12, h: 7 }, { x: 16, z: 28, w: 12, d: 8, h: 5 },
+    { x: 34, z: 32, w: 8, d: 8, h: 9 }, { x: 6, z: 40, w: 6, d: 4, h: 4 },
+  ];
+  const boxes = [], pillars = [{ x: 0, z: 0, r: 2.6, kind: 'fountain' }];
+  for (const [sx, sz] of SIGNS) {
+    for (const b of Q) boxes.push({ x: b.x * sx, z: b.z * sz, w: b.w, d: b.d, h: b.h, style: b.h >= 9 ? 'stone' : 'house' });
+    pillars.push({ x: 22 * sx, z: 22 * sz, r: 1.2, kind: 'tree' }, { x: 40 * sx, z: 20 * sz, r: 1.4, kind: 'well' });
+  }
+  for (const [x, z] of [[22, 0], [-22, 0], [0, 22], [0, -22]]) pillars.push({ x, z, r: 1.0, kind: 'barrel' });
+  return { id: 'town', name: '중세 마을', half: 48, theme: 'town', boxes, pillars, spawns: [...sp(42, [-8, 0, 8]), { x: -44, z: 4, team: 1 }, { x: 44, z: 4, team: 2 }] };
+}
+
+function makeFortress() { // 성채: 중앙 성 + 문 달린 성벽 + 모서리 탑 + 바깥 초소
+  const boxes = [{ x: 0, z: 0, w: 12, d: 12, h: 12, style: 'stone' }], pillars = [];
+  for (const sz of [-1, 1]) for (const sx of [-1, 1]) {
+    boxes.push({ x: sx * 11, z: sz * 18, w: 14, d: 2, h: 5, style: 'stone' }, { x: sx * 18, z: sz * 11, w: 2, d: 14, h: 5, style: 'stone' });
+  }
+  for (const [sx, sz] of SIGNS) {
+    boxes.push({ x: sx * 18, z: sz * 18, w: 6, d: 6, h: 10, style: 'stone' }, { x: sx * 34, z: sz * 34, w: 6, d: 6, h: 6, style: 'stone' }, { x: sx * 34, z: sz * 16, w: 4, d: 4, h: 3, style: 'stone' });
+  }
+  for (let i = 0; i < 8; i++) { const a = (i * Math.PI) / 4 + Math.PI / 8; pillars.push({ x: +(Math.cos(a) * 30).toFixed(2), z: +(Math.sin(a) * 30).toFixed(2), r: 1.2, kind: 'column' }); }
+  for (const [x, z] of [[0, 12], [0, -12], [12, 0], [-12, 0]]) pillars.push({ x, z, r: 1.0, kind: 'barrel' });
+  return { id: 'fortress', name: '성채', half: 48, theme: 'fortress', boxes, pillars, spawns: sp(43, [-8, 0, 8]) };
+}
+
+function makeForest() { // 숲 마을: 나무가 빽빽한 은폐물 + 오두막 4채 + 중앙 우물
+  const rand = rng(1337), boxes = [], pillars = [{ x: 0, z: 0, r: 2.0, kind: 'well' }];
+  for (const [x, z] of [[-22, -14], [22, 14], [-14, 22], [14, -22]]) boxes.push({ x, z, w: 8, d: 7, h: 5, style: 'house' });
+  const free = (x, z, r) => !(Math.abs(x) > 36 && Math.abs(z) < 14) && Math.hypot(x, z) > 5
+    && boxes.every((b) => Math.abs(x - b.x) > b.w / 2 + r + 1 && Math.abs(z - b.z) > b.d / 2 + r + 1)
+    && pillars.every((p) => Math.hypot(x - p.x, z - p.z) > p.r + r + 2.2);
+  for (let tries = 0; pillars.length < 56 && tries < 4000; tries++) {
+    const x = +((rand() * 2 - 1) * 44).toFixed(2), z = +((rand() * 2 - 1) * 44).toFixed(2);
+    if (free(x, z, 1.1)) pillars.push({ x, z, r: 1.1, kind: 'tree' });
+  }
+  return { id: 'forest', name: '숲 마을', half: 48, theme: 'forest', boxes, pillars, spawns: sp(43, [-8, 0, 8]) };
+}
+
+function makeColosseum() { // 투기장: 작고 가까운 전투. 가운데 단상 + 기둥 고리 + 돌덩이 엄폐물
+  const pillars = [{ x: 0, z: 0, r: 3.2, kind: 'dais' }], boxes = [];
+  for (let i = 0; i < 12; i++) { const a = (i * Math.PI) / 6 + Math.PI / 12; pillars.push({ x: +(Math.cos(a) * 22).toFixed(2), z: +(Math.sin(a) * 22).toFixed(2), r: 1.3, kind: 'column' }); }
+  for (const [sx, sz] of SIGNS) boxes.push({ x: sx * 11, z: sz * 11, w: 5, d: 5, h: 3, style: 'stone' });
+  return { id: 'colosseum', name: '투기장', half: 36, theme: 'colosseum', boxes, pillars, spawns: sp(32, [-8, -4, 0, 4, 8]) };
+}
+
+export const MAPS = { town: makeTown(), fortress: makeFortress(), forest: makeForest(), colosseum: makeColosseum() };
+// 클라이언트가 쓰는 "현재 맵". useMap(id)으로 같은 객체의 내용을 교체합니다. (서버는 방마다 맵을 따로 들고 있어서 이 객체를 쓰지 않습니다)
+export const ARENA = { ...MAPS.town };
+export function useMap(id) { Object.assign(ARENA, MAPS[id] || MAPS.town); }
 
 export const TEAMS = {
   1: { id: 1, name: '레드', color: 0xc0392b },
@@ -39,7 +71,10 @@ export const TEAMS = {
 };
 
 // 승리 조건: 개인전은 먼저 N킬, 팀전은 팀 합산 N킬. 끝나면 intermissionMs 후 새 판
-export const MATCH = { ffaKills: 20, teamKills: 30, intermissionMs: 10000 };
+// 한 판 3분(킬 목표를 먼저 채우면 일찍 종료). 시간 종료 시 동점은 무승부. 공개 방은 판이 끝나면 15초 투표(모드·맵) 후 3초 뒤 시작, 만든 방(방장 방)은 같은 설정으로 customRestartMs 뒤 재시작.
+// votableMaps: 투표에 올릴 맵. 투표에 올릴 맵 목록입니다. 줄이거나 늘릴 수 있어요.
+export const MATCH = { ffaKills: 20, teamKills: 30, durationMs: 180000, voteMs: 15000, resultMs: 3000, customRestartMs: 10000, votableMaps: ['town', 'fortress', 'forest', 'colosseum'] };
+export const ROOM = { maxRooms: 30, maxCustomPlayers: 16, nameLen: 24, passLen: 16 };
 
 export const PLAYER = {
   radius: 0.5,
@@ -137,9 +172,9 @@ export const CLASSES = {
 
 /* ───────────── 충돌 (서버·클라이언트 공용) ───────────── */
 // 원(반지름 r)을 기둥·건물 밖으로 밀어내고 경기장 안으로 제한
-export function resolveCollision(x, z, r = PLAYER.radius) {
+export function resolveCollision(x, z, r = PLAYER.radius, map = ARENA) {
   for (let pass = 0; pass < 2; pass++) {
-    for (const pl of ARENA.pillars) {
+    for (const pl of map.pillars) {
       const ex = x - pl.x, ez = z - pl.z;
       const d = Math.hypot(ex, ez), min = pl.r + r;
       if (d < min) {
@@ -147,7 +182,7 @@ export function resolveCollision(x, z, r = PLAYER.radius) {
         else x = pl.x + min;
       }
     }
-    for (const b of ARENA.boxes) {
+    for (const b of map.boxes) {
       const x0 = b.x - b.w / 2, x1 = b.x + b.w / 2, z0 = b.z - b.d / 2, z1 = b.z + b.d / 2;
       const cx = Math.max(x0, Math.min(x1, x)), cz = Math.max(z0, Math.min(z1, z));
       const dx = x - cx, dz = z - cz, d = Math.hypot(dx, dz);
@@ -161,14 +196,14 @@ export function resolveCollision(x, z, r = PLAYER.radius) {
       }
     }
   }
-  const lim = ARENA.half - r;
+  const lim = map.half - r;
   return [Math.max(-lim, Math.min(lim, x)), Math.max(-lim, Math.min(lim, z))];
 }
 
 // 두 점 사이를 건물·기둥이 가로막는지 (공격·원거리 사격 시야 판정)
-export function lineBlocked(ax, az, bx, bz) {
+export function lineBlocked(ax, az, bx, bz, map = ARENA) {
   const dx = bx - ax, dz = bz - az;
-  for (const b of ARENA.boxes) {
+  for (const b of map.boxes) {
     const lo = [b.x - b.w / 2, b.z - b.d / 2], hi = [b.x + b.w / 2, b.z + b.d / 2];
     const p = [ax, az], d = [dx, dz];
     let t0 = 0, t1 = 1, hit = true;
@@ -184,7 +219,7 @@ export function lineBlocked(ax, az, bx, bz) {
     if (hit) return true;
   }
   const L2 = dx * dx + dz * dz;
-  for (const pl of ARENA.pillars) {
+  for (const pl of map.pillars) {
     const t = L2 > 0 ? Math.max(0, Math.min(1, ((pl.x - ax) * dx + (pl.z - az) * dz) / L2)) : 0;
     if (Math.hypot(ax + dx * t - pl.x, az + dz * t - pl.z) < pl.r) return true;
   }
