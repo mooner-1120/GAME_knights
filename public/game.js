@@ -1394,7 +1394,7 @@ function syncRemotes() {
   const ids = new Set(roster.map((r) => r.id));
   for (const [id, r] of remotes) {
     const p = roster.find((x) => x.id === id);
-    if (!p || p.cls !== r.cls || p.name !== r.name || (p.team || 0) !== (r.team || 0) || JSON.stringify(p.eq || {}) !== r.eqKey) { removeRig(r); remotes.delete(id); }
+    if (id === me.id || !p || p.cls !== r.cls || p.name !== r.name || (p.team || 0) !== (r.team || 0) || JSON.stringify(p.eq || {}) !== r.eqKey) { removeRig(r); remotes.delete(id); }
   }
   for (const p of roster) {
     if (p.id === me.id || remotes.has(p.id)) continue;
