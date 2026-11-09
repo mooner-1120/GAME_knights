@@ -1090,8 +1090,8 @@ function buildCards(container, selectedId, onPick) {
     el.className = 'card' + (c.id === selectedId ? ' sel' : '');
     el.innerHTML = '<h3></h3><p class="d"></p>'
       + STATS.map(([n, f]) => `<div class="stat"><span>${t(n)}</span><div class="bar"><i style="width:${Math.round(clamp(f(c), 0.05, 1) * 100)}%"></i></div></div>`).join('')
-      + `<div class="skl"><b>Q</b> ${sk.icon} <em>${sname(sk)}</em> (${t('secs', { n: sk.cooldown })})</div>`
-      + `<div class="skl" style="border:0;margin:0;padding:0"><b>E</b> 🦶 <em>${sname(SKILLS.kick)}</em> (${t('nocd')})</div>`;
+      + `<div class="skl"><b>${keyLabel(binds.skill)}</b> ${sk.icon} <em>${sname(sk)}</em> (${t('secs', { n: sk.cooldown })})</div>`
+      + `<div class="skl" style="border:0;margin:0;padding:0"><b>${keyLabel(binds.kick)}</b> 🦶 <em>${sname(SKILLS.kick)}</em> (${t('nocd')})</div>`;
     el.querySelector('h3').textContent = `${cname(c)} · ${crole(c)}`;
     el.querySelector('.d').textContent = cdesc(c);
     el.onclick = () => {
@@ -1105,11 +1105,93 @@ function buildCards(container, selectedId, onPick) {
 const pickLobby = (id) => { selectedCls = id; setPreviewClass(id); };
 buildCards($('cards'), selectedCls, pickLobby);
 $('name').value = (() => { try { return localStorage.getItem('ironoath_name') || ''; } catch { return ''; } })();
+/* ═════════════ 키 설정 ═════════════
+   내부 코드는 항상 "기본 키 이름"(KeyW 등)으로 통일합니다. 사용자가 바꾼 키는 canon()에서 기본 키로 바꿔 줍니다. */
+const BIND_DEFAULTS = {
+  forward: 'KeyW', back: 'KeyS', left: 'KeyA', right: 'KeyD', sprint: 'ShiftLeft', jump: 'Space', crouch: 'KeyC',
+  block: 'KeyF', skill: 'KeyQ', kick: 'KeyE', emote: 'KeyV', chat: 'KeyY', teamchat: 'KeyT', board: 'Tab',
+};
+const BIND_ORDER = Object.keys(BIND_DEFAULTS);
+const binds = { ...BIND_DEFAULTS };
+try {
+  const raw = JSON.parse(localStorage.getItem('ironoath_binds') || '{}');
+  for (const a of BIND_ORDER) if (typeof raw[a] === 'string' && raw[a]) binds[a] = raw[a];
+  if (new Set(Object.values(binds)).size !== BIND_ORDER.length) Object.assign(binds, BIND_DEFAULTS); // 중복이 있으면 기본값으로
+} catch {}
+const saveBinds = () => { try { localStorage.setItem('ironoath_binds', JSON.stringify(binds)); } catch {} };
+const DEFAULT_CODES = new Set([...Object.values(BIND_DEFAULTS), 'ShiftRight']);
+let CANON = {};
+function rebuildCanon() {
+  CANON = {};
+  for (const a of BIND_ORDER) CANON[binds[a]] = BIND_DEFAULTS[a];
+  if (binds.sprint === 'ShiftLeft') CANON.ShiftRight = 'ShiftLeft'; // 기본값일 땐 오른쪽 Shift도 달리기
+}
+rebuildCanon();
+// 실제 눌린 키 → 내부 기본 키 이름 (다른 동작에 쓰이지 않는 옛 기본 키는 무시)
+const canon = (code) => CANON[code] ?? (DEFAULT_CODES.has(code) ? 'Unbound' : code);
+const keyLabel = (code) => {
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code.startsWith('Digit')) return code.slice(5);
+  const map = { Space: 'Space', ShiftLeft: 'L-Shift', ShiftRight: 'R-Shift', ControlLeft: 'L-Ctrl', ControlRight: 'R-Ctrl', AltLeft: 'L-Alt', AltRight: 'R-Alt', Tab: 'Tab', Backquote: '`', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', CapsLock: 'Caps' };
+  return map[code] || code.replace('Numpad', 'Num ');
+};
+const BANNED = (c) => c === 'Escape' || c === 'Enter' || c.startsWith('Digit') || /^F\d+$/.test(c) || c.startsWith('Meta') || c === 'ContextMenu';
+let rebinding = null;
+function refreshKbd() {
+  document.querySelectorAll('kbd[data-act]').forEach((k) => { k.textContent = keyLabel(binds[k.dataset.act]); });
+}
+function buildKeyList() {
+  const box = $('keylist');
+  if (!box) return;
+  box.textContent = '';
+  for (const a of BIND_ORDER) {
+    const row = document.createElement('div');
+    row.className = 'setrow';
+    const lab = document.createElement('span');
+    lab.textContent = t('ka_' + a);
+    const btn = document.createElement('button');
+    btn.className = 'btn2 keybtn';
+    btn.textContent = rebinding === a ? t('key_press') : keyLabel(binds[a]);
+    btn.onclick = () => startRebind(a);
+    row.append(lab, btn, document.createElement('span'));
+    box.appendChild(row);
+  }
+  refreshKbd();
+}
+function startRebind(a) {
+  rebinding = a;
+  buildKeyList();
+  const onKey = (e) => {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    window.removeEventListener('keydown', onKey, true);
+    const act = rebinding;
+    rebinding = null;
+    if (e.code !== 'Escape') {
+      if (BANNED(e.code)) { $('keymsg').textContent = t('key_banned'); }
+      else {
+        const other = BIND_ORDER.find((x) => x !== act && binds[x] === e.code);
+        if (other) { binds[other] = binds[act]; $('keymsg').textContent = t('key_swapped') + t('ka_' + other); }
+        else $('keymsg').textContent = ' ';
+        binds[act] = e.code;
+        saveBinds();
+        rebuildCanon();
+      }
+    }
+    resetInput();
+    buildKeyList();
+  };
+  addEventListener('keydown', onKey, true);
+}
+$('key-reset').onclick = () => { Object.assign(binds, BIND_DEFAULTS); saveBinds(); rebuildCanon(); $('keymsg').textContent = ' '; resetInput(); buildKeyList(); };
+buildKeyList();
+onLang(buildKeyList);
+
 function renderHelp() {
   $('help-skills').innerHTML = Object.values(CLASSES).map((c) => {
     const sk = SKILLS[c.skill];
-    return `<div style="margin:6px 0"><b>Q</b> ${sk.icon} <em>${sname(sk)}</em> <span style="opacity:.7">(${cname(c)})</span> — ${sdesc(sk)}</div>`;
-  }).join('') + `<div style="margin:6px 0"><b>E</b> 🦶 <em>${sname(SKILLS.kick)}</em> — ${sdesc(SKILLS.kick)}</div>`;
+    return `<div style="margin:6px 0"><b>${keyLabel(binds.skill)}</b> ${sk.icon} <em>${sname(sk)}</em> <span style="opacity:.7">(${cname(c)})</span> — ${sdesc(sk)}</div>`;
+  }).join('') + `<div style="margin:6px 0"><b>${keyLabel(binds.kick)}</b> 🦶 <em>${sname(SKILLS.kick)}</em> — ${sdesc(SKILLS.kick)}</div>`;
 }
 renderHelp();
 
@@ -1645,14 +1727,17 @@ for (const [key, id] of [['minimap', 'set-minimap'], ['netinfo', 'set-netinfo'],
 /* ═════════════ 입력 ═════════════ */
 const typing = (e) => e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA');
 addEventListener('keydown', (e) => {
-  if (e.code === 'Tab') { e.preventDefault(); if (joined) $('board').style.display = 'block'; }
+  if (rebinding) return;
+  const code = canon(e.code);
+  if (e.code === 'Tab') e.preventDefault();
+  if (code === 'Tab' && joined) $('board').style.display = 'block';
   if (typing(e)) return;
-  if (joined && locked() && (e.code === 'Space' || e.code.startsWith('Arrow'))) e.preventDefault();
-  keys[e.code] = true;
+  if (joined && locked() && (code === 'Space' || e.code.startsWith('Arrow'))) e.preventDefault();
+  keys[code] = true;
   if (e.repeat || !joined || !locked()) return;
-  if (e.code === 'KeyC') crouchPress = true;
-  if (e.code === 'KeyQ') useSkill('q');
-  if (e.code === 'KeyE') useSkill('e');
+  if (code === 'KeyC') crouchPress = true;
+  if (code === 'KeyQ') useSkill('q');
+  if (code === 'KeyE') useSkill('e');
   if (emoteOpen) {
     const n = parseInt(e.code.replace('Digit', ''), 10);
     openEmoteList(false);
@@ -1665,12 +1750,14 @@ addEventListener('keydown', (e) => {
     else if (vote.maps.length > 1 && k >= vote.modes.length && k - vote.modes.length < vote.maps.length) castVote('map', vote.maps[k - vote.modes.length]);
     return;
   }
-  if (e.code === 'KeyV') openEmoteList(true);
-  if (e.code === 'Enter' || e.code === 'KeyY') { e.preventDefault(); openChat(false); }
-  if (e.code === 'KeyT') { e.preventDefault(); openChat(true); }
+  if (code === 'KeyV') openEmoteList(true);
+  if (e.code === 'Enter' || code === 'KeyY') { e.preventDefault(); openChat(false); }
+  if (code === 'KeyT') { e.preventDefault(); openChat(true); }
 });
 addEventListener('keyup', (e) => {
-  if (e.code === 'Tab') $('board').style.display = 'none';
+  const code = canon(e.code);
+  if (code === 'Tab') $('board').style.display = 'none';
+  keys[code] = false;
   keys[e.code] = false;
 });
 addEventListener('blur', () => resetInput());
@@ -1977,7 +2064,7 @@ function updatePreviewInfo() {
   $('pv-role').textContent = crole(c);
   $('pv-desc').textContent = cdesc(c);
   $('pv-stats').innerHTML = STATS.map(([n, f]) => `<div class="stat"><span>${esc(t(n))}</span><div class="bar"><i style="width:${Math.round(clamp(f(c), 0.05, 1) * 100)}%"></i></div></div>`).join('');
-  $('pv-skill').innerHTML = `<b>Q</b> ${sk.icon} <em>${esc(sname(sk))}</em> — ${esc(sdesc(sk))} (${esc(t('secs', { n: sk.cooldown }))})<br><b>E</b> 🦶 <em>${esc(sname(SKILLS.kick))}</em> (${esc(t('nocd'))})`;
+  $('pv-skill').innerHTML = `<b>${keyLabel(binds.skill)}</b> ${sk.icon} <em>${esc(sname(sk))}</em> — ${esc(sdesc(sk))} (${esc(t('secs', { n: sk.cooldown }))})<br><b>${keyLabel(binds.kick)}</b> 🦶 <em>${esc(sname(SKILLS.kick))}</em> (${esc(t('nocd'))})`;
 }
 function renderPreview(dt) {
   if (!pv || $('lobby').style.display === 'none') return;
