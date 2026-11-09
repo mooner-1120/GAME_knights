@@ -436,6 +436,14 @@
   <div class="box">
     <h2 data-i18n="signin"></h2>
     <p class="note" data-i18n="login_why"></p>
+    <div id="em-form" style="display:flex;flex-direction:column;gap:8px;margin:12px 0">
+      <input id="em-email" type="email" autocomplete="email" data-i18n-ph="em_email" maxlength="80">
+      <input id="em-pass" type="password" autocomplete="current-password" data-i18n-ph="em_pass" maxlength="72">
+      <input id="em-nick" type="text" data-i18n-ph="em_nick" maxlength="16">
+      <div style="display:flex;gap:8px"><button class="btn2" id="em-login" style="flex:1" data-i18n="signin"></button><button class="btn2" id="em-signup" style="flex:1" data-i18n="em_signup"></button></div>
+      <div id="em-msg" class="note" style="min-height:18px"></div>
+    </div>
+    <div class="note" data-i18n="em_or"></div>
     <div id="login-providers"></div>
     <button class="btn2" id="login-close" data-i18n="back"></button>
   </div>

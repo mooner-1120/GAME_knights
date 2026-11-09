@@ -66,6 +66,28 @@ function openLogin() {
   }
   $('login-modal').style.display = 'flex';
 }
+function emMsg(k, p) { $('em-msg').textContent = k ? t(k, p) : ''; }
+function emCreds() {
+  const email = $('em-email').value.trim(), password = $('em-pass').value;
+  if (!/^\S+@\S+\.\S+$/.test(email)) { emMsg('em_bad_email'); return null; }
+  if (password.length < 6) { emMsg('em_short'); return null; }
+  return { email, password };
+}
+$('em-login').onclick = async () => {
+  const c = emCreds(); if (!c || !sb) return;
+  emMsg('em_wait');
+  const { error } = await sb.auth.signInWithPassword(c);
+  if (error) emMsg(/confirm/i.test(error.message) ? 'em_confirm' : 'em_wrong'); else emMsg('');
+};
+$('em-signup').onclick = async () => {
+  const c = emCreds(); if (!c || !sb) return;
+  emMsg('em_wait');
+  const nick = $('em-nick').value.trim().slice(0, 16);
+  const { data, error } = await sb.auth.signUp({ ...c, options: { data: nick ? { name: nick } : {}, emailRedirectTo: location.origin } });
+  if (error) emMsg(/registered|exists/i.test(error.message) ? 'em_exists' : 'em_fail', { e: error.message });
+  else if (data.user && !data.session) emMsg('em_check_mail'); // 이메일 확인이 켜져 있으면 메일의 링크를 눌러야 함
+  else emMsg('');
+};
 $('login-close').onclick = () => { $('login-modal').style.display = 'none'; };
 
 async function loadProfile() {
