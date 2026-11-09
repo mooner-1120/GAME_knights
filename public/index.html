@@ -65,6 +65,20 @@
   #name:focus { border-color: var(--ac); }
   #lobmsg { min-height: 22px; margin: 14px 0 4px; color: #ff8a7a; font-size: 13px; }
   .note { color: #8fa3c0; font-size: 12px; margin: 10px 0 0; }
+  #pbadge { font: 11px var(--px); color: #ffe9a8; white-space: nowrap; }
+  .h3 { margin: 18px 0 8px; font: 12px var(--px); color: var(--ac); }
+  .pf-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; } .pf-head b { font: 16px var(--px); color: var(--gold); }
+  .xpbar { flex: 1; min-width: 120px; height: 12px; background: rgba(0,0,0,.6); border: 2px solid #000; } .xpbar i { display: block; height: 100%; width: 0; background: linear-gradient(#6ad06a, #2f8a3a); }
+  .pf-head small { color: #9fb0c8; }
+  .pf-row { display: flex; align-items: center; gap: 12px; margin: 10px 0; font-size: 14px; color: #e9dcb8; } .pf-row span { min-width: 90px; color: #9fb0c8; } .pf-row b { color: #ffe9a8; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 12px; color: #f3e7c4; background: #131b28; border: 2px solid #3a4a64; cursor: pointer; }
+  .chip i { width: 12px; height: 12px; border: 1px solid #000; display: inline-block; } .chip.on { background: #2b3a22; box-shadow: 0 0 0 2px #e6c473; }
+  .ach { display: flex; align-items: center; gap: 10px; padding: 7px 10px; margin-bottom: 5px; background: rgba(12,18,30,.9); border: 2px solid #000; font-size: 13px; }
+  .ach .nm { flex: 1; min-width: 0; } .ach small { display: block; color: #8fa3c0; } .ach.done { border-color: #6a8a3a; } .ach .pg { width: 90px; height: 8px; background: #000; } .ach .pg i { display: block; height: 100%; background: #e6c473; }
+  .pull { display: inline-block; margin: 4px; padding: 8px 12px; font-size: 13px; background: #131b28; border: 3px solid #3a4a64; min-width: 150px; }
+  .pull small { display: block; color: #9fb0c8; font-size: 11px; } .pull.new { box-shadow: 0 0 10px currentColor; }
+  #x-reward { margin-top: 10px; color: #9be28a; font-size: 18px; }
   .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
   .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
   .card { padding: 12px; text-align: left; background: rgba(12,18,30,.9); border: 3px solid #000; cursor: pointer; }
@@ -323,10 +337,13 @@
       <button class="on" data-tab="play" data-i18n="nav_play"></button>
       <button data-tab="class" data-i18n="nav_class"></button>
       <button data-tab="rooms" data-i18n="nav_rooms"></button>
+      <button data-tab="profile" data-i18n="nav_profile"></button>
+      <button data-tab="shop" data-i18n="nav_shop"></button>
       <button data-tab="ranks" data-i18n="nav_ranks"></button>
       <button data-tab="settings" data-i18n="nav_settings"></button>
     </div>
     <div id="topright">
+      <div id="pbadge"></div>
       <select id="lang" aria-label="Language"></select>
       <div id="acct"></div>
     </div>
@@ -369,8 +386,36 @@
         </div>
         <p class="note" data-i18n="room_hostnote"></p>
       </section>
+      <section class="tab box" id="tab-profile">
+        <h2 class="h2" data-i18n="nav_profile"></h2>
+        <p class="note" id="pf-guest"></p>
+        <div id="pf-main" style="display:none">
+          <div class="pf-head"><b id="pf-lv"></b><div class="xpbar"><i id="pf-xpfill"></i></div><small id="pf-xp"></small></div>
+          <div class="pf-row"><span data-i18n="pf_coins"></span><b id="pf-coins"></b></div>
+          <div class="pf-row"><span data-i18n="pf_title"></span><select id="pf-titlesel"></select></div>
+          <h3 class="h3" data-i18n="pf_inv"></h3>
+          <div id="pf-inv"></div>
+          <h3 class="h3" data-i18n="pf_ach"></h3>
+          <div id="pf-ach"></div>
+          <h3 class="h3" data-i18n="pf_class"></h3>
+          <table class="lb" id="pf-cs"></table>
+        </div>
+      </section>
+      <section class="tab box" id="tab-shop">
+        <h2 class="h2" data-i18n="shop_title"></h2>
+        <p class="note" data-i18n="shop_note"></p>
+        <div class="pf-row"><span data-i18n="pf_coins"></span><b id="sh-coins">-</b></div>
+        <div id="sh-odds" class="note"></div>
+        <div class="row" style="margin:14px 0">
+          <button class="btn" id="sh-pull1"></button><button class="btn2" id="sh-pull10"></button>
+        </div>
+        <p class="note" id="sh-pity"></p>
+        <p class="note" id="sh-err" style="color:#ff9a8a"></p>
+        <div id="sh-result"></div>
+      </section>
       <section class="tab box" id="tab-ranks">
         <h2 style="margin:0 0 12px;font:15px var(--px);color:var(--gold)" data-i18n="leaderboard"></h2>
+        <div class="row" style="margin-bottom:10px"><select id="lb-class"></select></div>
         <table class="lb"><thead><tr><th>#</th><th data-i18n="b_name"></th><th data-i18n="b_kills"></th><th data-i18n="b_deaths"></th><th>W</th></tr></thead><tbody id="lbbody"></tbody></table>
         <p class="note" id="lbempty"></p>
       </section>

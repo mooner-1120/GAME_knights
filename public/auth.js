@@ -1,5 +1,6 @@
 // 로그인 / 프로필 / 실시간 순위표 (Supabase). 서버의 /config.json 에 공개 키가 없으면 게스트 전용으로 동작합니다.
-import { t, onLang } from './i18n.js';
+import { t, cname, onLang } from './i18n.js';
+import { CLASSES, levelFor } from '/classes.js';
 
 const $ = (id) => document.getElementById(id);
 // Supabase 대시보드 → Authentication → Providers 에서 켠 것만 실제로 동작합니다.
@@ -85,16 +86,31 @@ function renderLeaderboard(rows) {
     const nameTd = el('td');
     if (r.avatar_url) nameTd.append(el('img', { src: r.avatar_url, alt: '', referrerPolicy: 'no-referrer' }));
     nameTd.append(r.display_name || '???');
+    if (r.xp != null) nameTd.append(el('small', { textContent: `  Lv${levelFor(r.xp)}${r.title ? ' «' + t('ach_' + r.title) + '»' : ''}`, style: 'color:#9fb0c8;margin-left:6px' }));
     tr.append(el('td', { textContent: String(i + 1) }), nameTd, el('td', { textContent: String(r.kills) }), el('td', { textContent: String(r.deaths) }), el('td', { textContent: String(r.wins) }));
     body.append(tr);
   });
   $('lbempty').textContent = !sb ? t('login_off') : rows.length ? '' : t('lb_empty');
 }
 
+function fillClassFilter() {
+  const sel = $('lb-class');
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML = `<option value="">${t('lb_all')}</option>` + Object.values(CLASSES).map((c) => `<option value="${c.id}">${cname(c)}</option>`).join('');
+  sel.value = cur;
+  sel.onchange = loadLeaderboard;
+}
 async function loadLeaderboard() {
   if (!sb) return renderLeaderboard([]);
-  const { data } = await sb.from('profiles').select('display_name,avatar_url,kills,deaths,wins').order('kills', { ascending: false }).limit(10);
-  renderLeaderboard(data || []);
+  const cls = $('lb-class')?.value || '';
+  if (cls) { // 직업별 순위 (progression.sql 을 실행했을 때만 데이터가 있음)
+    const { data } = await sb.from('class_stats').select('kills,deaths,wins,profiles(display_name,avatar_url)').eq('class_id', cls).order('kills', { ascending: false }).limit(10);
+    return renderLeaderboard((data || []).map((r) => ({ display_name: r.profiles?.display_name, avatar_url: r.profiles?.avatar_url, kills: r.kills, deaths: r.deaths, wins: r.wins })));
+  }
+  let res = await sb.from('profiles').select('display_name,avatar_url,kills,deaths,wins,player_data(xp,title)').order('kills', { ascending: false }).limit(10);
+  if (res.error) res = await sb.from('profiles').select('display_name,avatar_url,kills,deaths,wins').order('kills', { ascending: false }).limit(10); // 진행도 테이블이 없으면 예전 방식
+  renderLeaderboard((res.data || []).map((r) => ({ ...r, xp: r.player_data?.xp ?? null, title: r.player_data?.title || null })));
 }
 
 function setSession(s) {
@@ -104,7 +120,8 @@ function setSession(s) {
   loadProfile();
 }
 
-onLang(() => { render(); loadLeaderboard(); });
+onLang(() => { render(); fillClassFilter(); loadLeaderboard(); });
+fillClassFilter();
 
 (async function init() {
   let cfg = {};

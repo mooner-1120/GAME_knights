@@ -2,7 +2,7 @@
 // 구성: 설정 → 렌더러/월드 → 블록형 기사 모델·애니메이션 → 1인칭 → 사운드 → 네트워크 → 메뉴/HUD → 입력 → 메인 루프
 
 import * as THREE from 'three';
-import { CLASSES, SKILLS, ARENA, PLAYER, TEAMS, EMOTES, MAPS, PROJ, resolveCollision, lineBlocked, projBlocked, useMap } from '/classes.js';
+import { CLASSES, SKILLS, ARENA, PLAYER, TEAMS, EMOTES, MAPS, PROJ, resolveCollision, lineBlocked, projBlocked, useMap, ACH, ITEMS, ITEM_BY_ID, RARITY, GACHA, gachaOdds, MODE_LIST, isTeamMode, MODE_RULES, ITEM_KINDS } from '/classes.js';
 import { t, cname, cdesc, crole, sname, sdesc, setLang, getLang, onLang, applyI18n, LANGS } from './i18n.js';
 
 const $ = (id) => document.getElementById(id);
@@ -569,7 +569,7 @@ function nameSprite(text, color) {
 // 한 명의 기사를 이루는 관절 구조
 //   root ─ legR, legL (엉덩이 관절)
 //        └ upper(허리 관절) ─ torso, head(목 관절), armR, armL(어깨 관절), shield
-function makeRig(clsId, name, team = 0) {
+function makeRig(clsId, name, team = 0, eq = null) {
   const c = CLASSES[clsId], L = getLook(clsId), M = getMats(clsId);
   const root = new THREE.Group();
   root.rotation.order = 'YXZ';
@@ -642,6 +642,7 @@ function makeRig(clsId, name, team = 0) {
   }
   if (team && TEAMS[team]) add(BOX(0.34, 0.55, 0.03), lam(TEAMS[team].color), 0, 0.3, 0.14, upper); // 팀 색 망토
 
+  const capeG = addCosmetics(eq, upper, head, add);
   let shield = null;
   if (clsId === 'shield') { shield = makeShield(L); upper.add(shield); }
 
@@ -658,7 +659,7 @@ function makeRig(clsId, name, team = 0) {
   }
   root.add(stars);
   scene.add(root);
-  return { root, upper, head, armR, armL, legR, legL, sword, shield, label, stars, bowPivot, bowModel, bowFx, xbow: W === 'crossbow', spear: W === 'spear', team, bubble: null, combo: 0, phase: 0, stepIdx: 0, block: 0, fall: 0, act: null, spinT: 0 };
+  return { capeG, root, upper, head, armR, armL, legR, legL, sword, shield, label, stars, bowPivot, bowModel, bowFx, xbow: W === 'crossbow', spear: W === 'spear', team, bubble: null, combo: 0, phase: 0, stepIdx: 0, block: 0, fall: 0, act: null, spinT: 0 };
 }
 function removeRig(r) {
   scene.remove(r.root);
@@ -952,7 +953,7 @@ let crouchPress = false;
 let touchPaused = false;
 let vote = null;
 let chatOpen = false, chatTeam = false, emoteOpen = false, emoteTimer = 0, endTimer = 0;
-let matchInfo = { mode: 'ffa', limit: 20, teamScore: { 1: 0, 2: 0 }, over: false, hostId: null };
+let matchInfo = { obj: null, mode: 'ffa', limit: 20, teamScore: { 1: 0, 2: 0 }, over: false, hostId: null };
 const TEAM_CSS = { 1: '#ff8c7a', 2: '#8ab8ff' };
 const keys = {};
 
@@ -1247,8 +1248,8 @@ function renderBoard() {
   for (const r of rows) {
     const tr = document.createElement('tr');
     if (r.id === me.id) tr.className = 'me';
-    if (matchInfo.mode === 'tdm' && TEAM_CSS[r.team]) tr.style.color = TEAM_CSS[r.team];
-    for (const [txt, cls] of [[r.name, ''], [CLASSES[r.cls] ? cname(CLASSES[r.cls]) : r.cls, ''], [r.kills, 'n'], [r.deaths, 'n']]) {
+    if (isTeamMode(matchInfo.mode) && TEAM_CSS[r.team]) tr.style.color = TEAM_CSS[r.team];
+    for (const [txt, cls] of [[(r.lv ? `Lv${r.lv} ` : '') + r.name + (r.ttl ? ` «${t('ach_' + r.ttl)}»` : ''), ''], [CLASSES[r.cls] ? cname(CLASSES[r.cls]) : r.cls, ''], [r.kills, 'n'], [r.deaths, 'n']]) {
       const td = document.createElement('td');
       td.textContent = txt;
       if (cls) td.className = cls;
@@ -1324,7 +1325,7 @@ function drawMinimap() {
   mg.fillStyle = '#9c9a93';
   for (const r of remotes.values()) {
     if (!r.alive) continue;
-    mg.fillStyle = matchInfo.mode === 'tdm' && r.team === me.team ? '#5ab0ff' : '#ff5a4a';
+    mg.fillStyle = isTeamMode(matchInfo.mode) && r.team === me.team ? '#5ab0ff' : '#ff5a4a';
     mg.beginPath(); mg.arc(r.root.position.x * s, r.root.position.z * s, 4.5, 0, TAU); mg.fill();
     mg.strokeStyle = '#2a0805'; mg.lineWidth = 1.5; mg.stroke();
   }
@@ -1378,13 +1379,13 @@ function syncRemotes() {
   const ids = new Set(roster.map((r) => r.id));
   for (const [id, r] of remotes) {
     const p = roster.find((x) => x.id === id);
-    if (!p || p.cls !== r.cls || p.name !== r.name || (p.team || 0) !== (r.team || 0)) { removeRig(r); remotes.delete(id); }
+    if (!p || p.cls !== r.cls || p.name !== r.name || (p.team || 0) !== (r.team || 0) || JSON.stringify(p.eq || {}) !== r.eqKey) { removeRig(r); remotes.delete(id); }
   }
   for (const p of roster) {
     if (p.id === me.id || remotes.has(p.id)) continue;
-    const rig = makeRig(p.cls, p.name, p.team || 0);
+    const rig = makeRig(p.cls, p.name, p.team || 0, p.eq);
     remotes.set(p.id, {
-      id: p.id, cls: p.cls, name: p.name, ...rig,
+      id: p.id, cls: p.cls, name: p.name, eqKey: JSON.stringify(p.eq || {}), ...rig,
       yaw: 0, tx: 0, ty: 0, tz: 0, tyaw: 0, tpitch: 0, pitch: 0, px: 0, pz: 0, v: 0,
       blocking: false, alive: true, init: false, stunUntil: 0,
     });
@@ -1431,7 +1432,7 @@ function handle(m) {
     case 'welcome':
       resetLocal();
       me.streak = 0;
-      Object.assign(me, { team: m.team || 0, id: m.id, cls: m.cls, x: m.x, y: m.y, z: m.z, yaw: m.yaw, pitch: 0, hp: m.hp, alive: true });
+      Object.assign(me, { team: m.team || 0, id: m.id, cls: m.cls, x: m.x, y: m.y, z: m.z, yaw: m.yaw, pitch: 0, hp: m.hp, alive: m.alive !== false });
       roster = m.roster;
       applyMap(m.map || 'town');
       joined = true;
@@ -1551,6 +1552,24 @@ function handle(m) {
     case 'deathinfo':
       deathInfo = m;
       break;
+    case 'profile':
+      setProfile(m);
+      break;
+    case 'gacharesult':
+      showGachaResult(m);
+      break;
+    case 'gachaerr':
+      $('sh-err').textContent = t(m.code === 'coins' ? 'shop_err_coins' : 'shop_err_login');
+      break;
+    case 'ach':
+      toast(t('ach_toast', { n: t('ach_' + m.id), c: m.coins }));
+      break;
+    case 'matchreward': {
+      const line = t('reward_line', { xp: m.xp, c: m.coins }) + (m.levelUp ? ` · ${t('levelup', { n: m.level })}` : '') + (m.practice ? ` ${t('reward_practice')}` : '');
+      const el = $('x-reward');
+      if (el) el.textContent = line; else toast(line);
+      break;
+    }
     case 'invite': {
       const link = `${location.origin}/?room=${encodeURIComponent(m.room)}${m.pw ? '&pw=' + encodeURIComponent(m.pw) : ''}`;
       const done = () => toast(t('invite_copied'));
@@ -1599,10 +1618,30 @@ function handle(m) {
       ws = null;
       break;
     case 'match':
-      matchInfo = { mode: m.mode, limit: m.limit, teamScore: m.teamScore, over: m.over, hostId: m.hostId, map: m.map, custom: m.custom, room: m.room, remainMs: m.remainMs, roomId: m.roomId, bots: m.bots || 0, botTarget: m.botTarget || 0, botDiff: m.botDiff || 3, practice: !!m.practice, at: performance.now() };
+      matchInfo = { mode: m.mode, limit: m.limit, teamScore: m.teamScore, over: m.over, hostId: m.hostId, map: m.map, custom: m.custom, room: m.room, remainMs: m.remainMs, roomId: m.roomId, bots: m.bots || 0, botTarget: m.botTarget || 0, botDiff: m.botDiff || 3, practice: !!m.practice, obj: m.obj || null, at: performance.now() };
       applyMap(m.map);
+      rebuildObjects();
       if (!m.over) { vote = null; clearInterval(endTimer); $('x-end').style.display = 'none'; }
       updateMatchHud();
+      break;
+    case 'obj':
+      if (matchInfo) matchInfo.obj = m.obj;
+      updateMatchHud();
+      break;
+    case 'objevent': objEventFx(m); break;
+    case 'item':
+      if (matchInfo.obj?.items) matchInfo.obj.items[m.i] = m.active ? 1 : 0;
+      if (!m.active) { const it = MAPS[currentMap]?.obj?.items?.[m.i]; if (it) { burst(it.x, 1, it.z, ITEM_KINDS[it.kind].color, 10); ring(it.x, it.z, ITEM_KINDS[it.kind].color, 2.2, 0.5); } if (m.by === me.id) toast(t('item_' + m.kind)); }
+      break;
+    case 'roundstart':
+      if (matchInfo.obj) matchInfo.obj.kings = m.kings;
+      kingIds = m.kings || [null, null];
+      banner(t('round_start', { n: m.n }));
+      if (m.mode === 'king' && m.kings) banner(t(m.kings.includes(me.id) ? 'king_you' : 'king_start', { n: m.n }));
+      if (m.mode === 'survival' || m.mode === 'king') { me.alive = true; $('death').style.display = 'none'; }
+      break;
+    case 'roundend':
+      banner(m.winner ? t('round_win', { t: t('team_' + m.winner) }) : t('round_draw'));
       break;
     case 'matchend':
       showMatchEnd(m);
@@ -1756,6 +1795,141 @@ for (const [key, id] of [['minimap', 'set-minimap'], ['netinfo', 'set-netinfo'],
   el.onchange = () => { S[key] = el.checked; applyHudSettings(); saveSettings(); };
 }
 
+
+/* ═════════════ 성장: 프로필 / 업적 / 상점 / 꾸미기 ═════════════ */
+let prof = null;            // 서버가 보내 준 내 진행도 ({guest:true} 이면 게스트)
+let lobbyWs = null, lobbyTok = null;
+const RAR_COLOR = { common: '#b8c4d6', rare: '#5aa8ff', epic: '#c06aff', legendary: '#ffb02e' };
+const hex6 = (n) => '#' + n.toString(16).padStart(6, '0');
+const itemName = (id) => t('item_' + id);
+// 로비에서는 로비 연결로, 게임 중에는 게임 연결로 보냄
+function profSend(o) {
+  const w = joined ? ws : lobbyWs;
+  if (w && w.readyState === 1) w.send(JSON.stringify(o));
+}
+function lobbyTick() {
+  const tok = window.ironToken || null;
+  if (joined) return;
+  if (!tok) {
+    if (lobbyWs) { const w = lobbyWs; lobbyWs = null; try { w.close(); } catch {} }
+    lobbyTok = null;
+    if (!prof || !prof.guest) { prof = { guest: true }; renderProgress(); }
+    return;
+  }
+  if (lobbyWs && lobbyWs.readyState <= 1 && lobbyTok === tok) return;
+  if (lobbyWs) { const w = lobbyWs; lobbyWs = null; try { w.close(); } catch {} }
+  lobbyTok = tok;
+  const sock = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
+  lobbyWs = sock;
+  sock.onopen = () => sock.send(JSON.stringify({ t: 'getprofile', token: tok }));
+  sock.onmessage = (e) => { try { const m = JSON.parse(e.data); if (m.t === 'profile' || m.t === 'gacharesult' || m.t === 'gachaerr') handle(m); } catch {} };
+  sock.onclose = () => { if (lobbyWs === sock) { lobbyWs = null; lobbyTok = null; } };
+}
+setInterval(lobbyTick, 1500);
+lobbyTick();
+
+function setProfile(m) {
+  const prevEq = JSON.stringify(prof?.equipped || {});
+  prof = m;
+  renderProgress();
+  if (JSON.stringify(m.equipped || {}) !== prevEq && typeof setPreviewClass === 'function' && pv) setPreviewClass(selectedCls);
+}
+function renderProgress() { updateBadge(); renderProfile(); renderShop(); }
+function updateBadge() {
+  const b = $('pbadge');
+  if (!b) return;
+  b.textContent = prof && !prof.guest ? `${t('pf_level', { n: prof.level })} · ${prof.coins} 🪙` : '';
+}
+function chipRow(slot) {
+  const list = ITEMS.filter((i) => i.slot === slot && prof.owned.includes(i.id));
+  const cur = prof.equipped[slot] || null;
+  const none = `<span class="chip${cur ? '' : ' on'}" data-slot="${slot}" data-id="">${esc(t('pf_none'))}</span>`;
+  return `<div style="margin:6px 0 2px;color:#9fb0c8;font-size:12px">${esc(t('slot_' + slot))}</div><div class="chips">${none}${list.map((i) =>
+    `<span class="chip${cur === i.id ? ' on' : ''}" data-slot="${slot}" data-id="${i.id}" style="border-color:${RAR_COLOR[i.rar]}"><i style="background:${hex6(i.color)}"></i>${esc(itemName(i.id))}</span>`).join('')}</div>`;
+}
+function renderProfile() {
+  const g = $('pf-guest'), main = $('pf-main');
+  if (!g || !main) return;
+  if (!prof || prof.guest) {
+    g.textContent = prof?.off ? t('pf_off') : t('pf_guest');
+    g.style.display = '';
+    main.style.display = 'none';
+    return;
+  }
+  g.style.display = 'none';
+  main.style.display = '';
+  $('pf-lv').textContent = t('pf_level', { n: prof.level });
+  const span = prof.nextXp == null ? 1 : prof.nextXp - prof.curXp;
+  $('pf-xpfill').style.width = `${prof.nextXp == null ? 100 : clamp(((prof.xp - prof.curXp) / span) * 100, 0, 100)}%`;
+  $('pf-xp').textContent = prof.nextXp == null ? t('pf_maxlv') : t('pf_xp', { a: prof.xp - prof.curXp, b: span });
+  $('pf-coins').textContent = `${prof.coins} 🪙`;
+  const sel = $('pf-titlesel');
+  const unlocked = ACH.filter((a) => a.title && prof.ach[a.id]);
+  sel.innerHTML = `<option value="">${esc(t('pf_notitle'))}</option>` + unlocked.map((a) => `<option value="${a.id}"${prof.title === a.id ? ' selected' : ''}>${esc(t('ach_' + a.id))}</option>`).join('');
+  sel.onchange = () => profSend({ t: 'settitle', id: sel.value || null });
+  const inv = $('pf-inv');
+  inv.innerHTML = prof.owned.length ? chipRow('cape') + chipRow('hat') : `<p class="note">${esc(t('pf_inv_empty'))}</p>`;
+  inv.querySelectorAll('.chip').forEach((c) => { c.onclick = () => profSend({ t: 'equip', slot: c.dataset.slot, id: c.dataset.id || null }); });
+  $('pf-ach').innerHTML = ACH.map((a) => {
+    const v = prof.counters[a.c] || 0, done = !!prof.ach[a.id];
+    return `<div class="ach${done ? ' done' : ''}"><div class="nm"><b>${esc(t('ach_' + a.id))}</b>${done ? ' ✔' : ''}<small>${esc(t('achc_' + a.c, { n: a.goal }))} · +${a.coins} 🪙</small></div><div class="pg"><i style="width:${Math.min(100, (v / a.goal) * 100)}%"></i></div><small style="min-width:54px;text-align:right">${Math.min(v, a.goal)}/${a.goal}</small></div>`;
+  }).join('');
+  const rows = Object.entries(prof.stats).sort((a, b) => b[1].kills - a[1].kills);
+  $('pf-cs').innerHTML = `<thead><tr><th>${esc(t('b_class'))}</th><th>${esc(t('b_kills'))}</th><th>${esc(t('b_deaths'))}</th><th>W</th><th>K/D</th></tr></thead><tbody>${rows.map(([id, s]) =>
+    `<tr><td>${esc(CLASSES[id] ? cname(CLASSES[id]) : id)}</td><td>${s.kills}</td><td>${s.deaths}</td><td>${s.wins}</td><td>${s.deaths ? (s.kills / s.deaths).toFixed(2) : s.kills}</td></tr>`).join('')}</tbody>`;
+}
+function renderShop() {
+  if (!$('sh-coins')) return;
+  const logged = prof && !prof.guest;
+  $('sh-coins').textContent = logged ? `${prof.coins} 🪙` : '-';
+  const odds = gachaOdds();
+  $('sh-odds').textContent = `${t('shop_odds')}: ` + Object.keys(RARITY).map((k) => `${t('rar_' + k)} ${odds[k]}%`).join(' · ');
+  $('sh-pull1').textContent = t('shop_pull1', { c: GACHA.cost1 });
+  $('sh-pull10').textContent = t('shop_pull10', { c: GACHA.cost10 });
+  $('sh-pull1').disabled = $('sh-pull10').disabled = !logged;
+  const pity = logged ? prof.counters.pity || 0 : 0;
+  $('sh-pity').textContent = logged ? t('shop_pity', { n: Math.max(1, GACHA.pityAt - pity) }) : t('shop_err_login');
+}
+$('sh-pull1').onclick = () => { $('sh-err').textContent = ''; profSend({ t: 'gacha', n: 1 }); };
+$('sh-pull10').onclick = () => { $('sh-err').textContent = ''; profSend({ t: 'gacha', n: 10 }); };
+function showGachaResult(m) {
+  $('sh-result').innerHTML = m.items.map((it) => {
+    const def = ITEM_BY_ID[it.id];
+    return `<span class="pull${it.dup ? '' : ' new'}" style="color:${RAR_COLOR[it.rar]};border-color:${RAR_COLOR[it.rar]}"><b style="color:${hex6(def.color)}">■</b> ${esc(itemName(it.id))}<small>${esc(t('rar_' + it.rar))} · ${it.dup ? esc(t('shop_dup', { c: it.refund })) : esc(t('shop_new'))}</small></span>`;
+  }).join('');
+}
+// 장비(망토/모자) 모델: 리그에 붙임
+function addCosmetics(eq, upper, head, add) {
+  let capeG = null;
+  const mat = (it) => (it.glow ? new THREE.MeshBasicMaterial({ color: it.glow }) : lam(it.color));
+  const cape = eq?.cape && ITEM_BY_ID[eq.cape];
+  if (cape) {
+    capeG = new THREE.Group();
+    capeG.position.set(0, 0.66, 0.2);
+    add(BOX(0.46, 0.74, 0.035), cape.glow ? new THREE.MeshBasicMaterial({ color: cape.color }) : lam(cape.color), 0, -0.37, 0, capeG);
+    add(BOX(0.5, 0.06, 0.05), lam(0x222222), 0, 0, 0, capeG); // 어깨선
+    upper.add(capeG);
+  }
+  const hat = eq?.hat && ITEM_BY_ID[eq.hat];
+  if (hat) {
+    const m = mat(hat);
+    switch (hat.kind) {
+      case 'plume': add(BOX(0.1, 0.1, 0.1), lam(0x888888), 0, 0.5, 0, head); add(BOX(0.07, 0.34, 0.07), m, 0, 0.74, 0, head).rotation.x = -0.25; break;
+      case 'horns': add(BOX(0.12, 0.3, 0.12), m, 0.27, 0.5, 0, head).rotation.z = -0.5; add(BOX(0.12, 0.3, 0.12), m, -0.27, 0.5, 0, head).rotation.z = 0.5;
+        add(BOX(0.08, 0.2, 0.08), m, 0.4, 0.68, 0, head).rotation.z = -0.2; add(BOX(0.08, 0.2, 0.08), m, -0.4, 0.68, 0, head).rotation.z = 0.2; break;
+      case 'crest': for (let i = 0; i < 4; i++) add(BOX(0.06, 0.12 + (i === 1 || i === 2 ? 0.1 : 0), 0.1), m, 0, 0.52 + (i === 1 || i === 2 ? 0.05 : 0), -0.18 + i * 0.12, head); break;
+      case 'wizard': add(BOX(0.78, 0.05, 0.78), m, 0, 0.47, 0, head); add(BOX(0.44, 0.24, 0.44), m, 0, 0.6, 0, head); add(BOX(0.3, 0.24, 0.3), m, 0.02, 0.82, 0, head);
+        add(BOX(0.16, 0.22, 0.16), m, 0.07, 1.02, 0, head).rotation.z = -0.35; break;
+      case 'crown': add(BOX(0.5, 0.1, 0.5), m, 0, 0.5, 0, head);
+        for (const [x, z] of [[-0.2, -0.2], [0.2, -0.2], [-0.2, 0.2], [0.2, 0.2], [0, 0]]) add(BOX(0.09, 0.16, 0.09), m, x, 0.62, z, head); break;
+      case 'halo': for (let i = 0; i < 8; i++) { const a = (i / 8) * TAU; add(BOX(0.14, 0.04, 0.14), m, Math.cos(a) * 0.3, 0.8, Math.sin(a) * 0.3, head); } break;
+      case 'dragon': add(BOX(0.52, 0.1, 0.52), lam(0x3a1a10), 0, 0.5, 0, head);
+        for (const [x, z, h] of [[-0.2, 0, 0.3], [0, -0.15, 0.42], [0.2, 0, 0.3], [0, 0.15, 0.22]]) add(BOX(0.1, h, 0.1), m, x, 0.55 + h / 2, z, head); break;
+    }
+  }
+  return capeG;
+}
+
 /* ═════════════ 입력 ═════════════ */
 const typing = (e) => e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA');
 addEventListener('keydown', (e) => {
@@ -1778,7 +1952,7 @@ addEventListener('keydown', (e) => {
     return;
   }
   if (vote && !vote.done) {
-    const k = parseInt(e.code.replace('Digit', ''), 10) - 1;
+    const dg = parseInt(e.code.replace('Digit', ''), 10); const k = dg === 0 ? 9 : dg - 1;
     if (k >= 0 && k < vote.modes.length) castVote('mode', vote.modes[k]);
     else if (vote.maps.length > 1 && k >= vote.modes.length && k - vote.modes.length < vote.maps.length) castVote('map', vote.maps[k - vote.modes.length]);
     return;
@@ -1890,6 +2064,103 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '
   });
 })();
 
+// ── 목표물(깃발/거점/아이템/왕관) ──
+let kingIds = [null, null];
+const objGroup = new THREE.Group();
+scene.add(objGroup);
+const objRefs = { flags: [], pts: [], items: [], crowns: [] };
+const crownMat = new THREE.MeshBasicMaterial({ color: 0xffd24a });
+function rebuildObjects() {
+  const key = currentMap + '|' + matchInfo.mode;
+  if (objGroup.userData.key === key) return;
+  objGroup.userData.key = key;
+  for (const c of [...objGroup.children]) { objGroup.remove(c); c.traverse?.((n) => { n.geometry?.dispose?.(); n.material?.dispose?.(); }); }
+  objRefs.flags = []; objRefs.pts = []; objRefs.items = []; objRefs.crowns = [];
+  const mo = MAPS[currentMap]?.obj, md = matchInfo.mode;
+  if (!mo) return;
+  const teamCol = { 1: 0xe0463a, 2: 0x3a7be0 };
+  if (md === 'ctf') {
+    for (const tm of [1, 2]) {
+      const g = new THREE.Group();
+      const pole = new THREE.Mesh(BOX(0.12, 3.2, 0.12), new THREE.MeshLambertMaterial({ color: 0x6b4a2a }));
+      pole.position.y = 1.6;
+      const cloth = new THREE.Mesh(BOX(1.1, 0.7, 0.05), new THREE.MeshLambertMaterial({ color: teamCol[tm], side: THREE.DoubleSide }));
+      cloth.position.set(0.6, 2.8, 0);
+      g.add(pole, cloth);
+      objGroup.add(g);
+      const base = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: teamCol[tm], transparent: true, opacity: 0.7, side: THREE.DoubleSide, depthWrite: false }));
+      base.scale.setScalar(2.2); base.position.set(mo.flags[tm].x, 0.06, mo.flags[tm].z);
+      objGroup.add(base);
+      objRefs.flags[tm - 1] = g;
+    }
+  }
+  if (md === 'points') {
+    const R = MODE_RULES.points.radius;
+    mo.points.forEach((pt, i) => {
+      const r = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: 0xcccccc, transparent: true, opacity: 0.8, side: THREE.DoubleSide, depthWrite: false }));
+      r.scale.setScalar(R); r.position.set(pt.x, 0.08, pt.z);
+      const pole = new THREE.Mesh(BOX(0.15, 3, 0.15), new THREE.MeshLambertMaterial({ color: 0xcccccc }));
+      pole.position.set(pt.x, 1.5, pt.z);
+      objGroup.add(r, pole);
+      objRefs.pts[i] = { r, pole };
+    });
+  }
+  mo.items.forEach((it, i) => {
+    const m = new THREE.Mesh(BOX(0.5, 0.5, 0.5), new THREE.MeshBasicMaterial({ color: ITEM_KINDS[it.kind].color }));
+    m.position.set(it.x, 1, it.z);
+    objGroup.add(m);
+    objRefs.items[i] = m;
+  });
+  for (let i = 0; i < 2; i++) { const c = new THREE.Mesh(BOX(0.5, 0.3, 0.5), crownMat); c.visible = false; objGroup.add(c); objRefs.crowns[i] = c; }
+}
+function actorPosXYZ(id) {
+  if (id === me.id) return { x: me.x, y: me.y, z: me.z };
+  const r = remotes.get(id);
+  return r ? { x: r.root.position.x, y: r.root.position.y, z: r.root.position.z } : null;
+}
+function updateObjects(nowMs) {
+  const o = matchInfo.obj;
+  if (!o) return;
+  if (objRefs.flags.length && o.flags) {
+    o.flags.forEach((f, i) => {
+      const g = objRefs.flags[i]; if (!g) return;
+      let x = f.x, y = 0, z = f.z;
+      if (f.s === 'carried') { const p = actorPosXYZ(f.c); if (p) { x = p.x; z = p.z; y = 1.9; } }
+      g.position.set(x, y, z);
+      g.rotation.y = f.s === 'carried' ? Math.sin(nowMs * 0.006) * 0.4 : 0;
+    });
+  }
+  if (objRefs.pts.length && o.pts) {
+    const col = [0xcccccc, 0xe0463a, 0x3a7be0];
+    o.pts.forEach((q, i) => {
+      const r = objRefs.pts[i]; if (!r) return;
+      const c = q.o ? col[q.o] : (q.b > 0 ? col[1] : q.b < 0 ? col[2] : col[0]);
+      r.r.material.color.setHex(c); r.pole.material.color.setHex(c);
+      r.r.material.opacity = q.o ? 0.95 : 0.55 + Math.min(0.3, Math.abs(q.b) / 300);
+    });
+  }
+  objRefs.items.forEach((m, i) => {
+    if (!m) return;
+    const on = !o.items || o.items[i] !== 0;
+    m.visible = on;
+    if (on) { m.rotation.y = nowMs * 0.003; m.position.y = 1 + Math.sin(nowMs * 0.004 + i) * 0.15; }
+  });
+  for (let i = 0; i < 2; i++) {
+    const c = objRefs.crowns[i]; if (!c) continue;
+    const id = matchInfo.mode === 'king' ? kingIds[i] : null;
+    const p = id != null ? actorPosXYZ(id) : null;
+    c.visible = !!p && !(id === me.id);
+    if (p) { c.position.set(p.x, p.y + 2.5, p.z); c.rotation.y = nowMs * 0.004; }
+  }
+}
+function objEventFx(m) {
+  const who = m.by != null ? nameOf(m.by) : '';
+  const tn = t('team_' + m.team);
+  const map = { pickup: 'ev_pickup', drop: 'ev_drop', return: 'ev_return', capture: 'ev_capture' };
+  if (map[m.ev]) toast(t(map[m.ev], { n: who, t: tn }));
+  if (m.ev === 'capture') banner(t('ev_capture', { n: who, t: tn }));
+}
+
 function timeHtml() {
   if (matchInfo.over || matchInfo.remainMs == null) return '';
   const left = Math.max(0, matchInfo.remainMs - (performance.now() - matchInfo.at));
@@ -1901,9 +2172,16 @@ function updateMatchHud() {
   if (!joined) { el.style.display = 'none'; return; }
   el.style.display = 'block';
   const tm = timeHtml();
-  if (matchInfo.mode === 'tdm') {
+  const md = matchInfo.mode, o = matchInfo.obj || {};
+  if (isTeamMode(md)) {
     const mine = me.team ? `${esc(t('m_myteam'))}: <span style="color:${TEAM_CSS[me.team]}">${esc(t('team_' + me.team))}</span> · ` : '';
-    el.innerHTML = tm + `<span style="color:${TEAM_CSS[1]}">${esc(t('team_1'))} ${matchInfo.teamScore[1]}</span> <b>:</b> <span style="color:${TEAM_CSS[2]}">${matchInfo.teamScore[2]} ${esc(t('team_2'))}</span><small>${mine}${esc(t('m_tdm', { n: matchInfo.limit }))}</small>`;
+    let extra = '';
+    if (md === 'tdm') extra = t('m_tdm', { n: matchInfo.limit });
+    else if (md === 'ctf') extra = t('m_ctf', { n: matchInfo.limit }) + (o.flags ? ' · ' + [1, 2].map((k) => { const f = o.flags[k - 1]; return f.s === 'carried' ? t('f_carried') : f.s === 'dropped' ? t('f_dropped') : ''; }).filter(Boolean).map((x, i) => x).join('/') : '');
+    else if (md === 'points') extra = t('m_points', { n: matchInfo.limit }) + (o.pts ? ' · ' + o.pts.map((q) => (q.o ? (q.o === 1 ? '🟥' : '🟦') : '⬜')).join('') : '');
+    else if (md === 'survival') extra = t('m_survival', { n: matchInfo.limit, r: o.round?.n || 0 }) + (o.round ? ` · ${o.round.alive[0]} vs ${o.round.alive[1]}` : '');
+    else if (md === 'king') extra = t('m_king', { n: matchInfo.limit, r: o.round?.n || 0 });
+    el.innerHTML = tm + `<span style="color:${TEAM_CSS[1]}">${esc(t('team_1'))} ${matchInfo.teamScore[1]}</span> <b>:</b> <span style="color:${TEAM_CSS[2]}">${matchInfo.teamScore[2]} ${esc(t('team_2'))}</span><small>${mine}${esc(extra)}</small>`;
   } else {
     const top = [...roster].sort((a, b) => b.kills - a.kills)[0];
     el.innerHTML = tm + `${esc(t('m_ffa', { n: matchInfo.limit }))}<small>${top ? esc(t('m_lead', { n: top.name, k: top.kills })) : ''}</small>`;
@@ -1912,10 +2190,11 @@ function updateMatchHud() {
 
 function showMatchEnd(m) {
   const el = $('x-end');
-  const title = esc(m.draw ? t('draw') : m.mode === 'tdm' ? t('win_team', { t: t('team_' + m.winnerTeam) }) : t('win_player', { n: nameOf(m.winnerId) }));
-  const mineWon = !m.draw && (m.mode === 'tdm' ? m.winnerTeam === me.team : m.winnerId === me.id);
-  const rows = m.board.slice(0, 8).map((r) => `<tr style="color:${m.mode === 'tdm' ? TEAM_CSS[r.team] : '#f3e7c4'}"><td>${esc(r.name)}</td><td>${esc(CLASSES[r.cls] ? cname(CLASSES[r.cls]) : r.cls)}</td><td>${r.kills}</td><td>${r.deaths}</td></tr>`).join('');
+  const title = esc(m.draw ? t('draw') : isTeamMode(m.mode) ? t('win_team', { t: t('team_' + m.winnerTeam) }) : t('win_player', { n: nameOf(m.winnerId) }));
+  const mineWon = !m.draw && (isTeamMode(m.mode) ? m.winnerTeam === me.team : m.winnerId === me.id);
+  const rows = m.board.slice(0, 8).map((r) => `<tr style="color:${isTeamMode(m.mode) ? TEAM_CSS[r.team] : '#f3e7c4'}"><td>${esc(r.name)}</td><td>${esc(CLASSES[r.cls] ? cname(CLASSES[r.cls]) : r.cls)}</td><td>${r.kills}</td><td>${r.deaths}</td></tr>`).join('');
   el.innerHTML = `<h1>${title}</h1><div>${m.draw ? '' : esc(mineWon ? t('victory') : t('defeat'))}</div><table><tr><th>${esc(t('b_name'))}</th><th>${esc(t('b_class'))}</th><th>${esc(t('b_kills'))}</th><th>${esc(t('b_deaths'))}</th></tr>${rows}</table><div id="x-vote"></div><div id="x-endcd"></div>`;
+  el.insertAdjacentHTML('beforeend', '<div id="x-reward"></div>');
   el.style.display = 'block';
   startEndCountdown(m.nextMs);
 }
@@ -1964,7 +2243,7 @@ function showBubble(r, text, ms = 3500, big = false) {
 function addChat(m) {
   const log = $('x-chatlog');
   const d = document.createElement('div');
-  const col = matchInfo.mode === 'tdm' && TEAM_CSS[m.team] ? TEAM_CSS[m.team] : '#ffe9a8';
+  const col = isTeamMode(matchInfo.mode) && TEAM_CSS[m.team] ? TEAM_CSS[m.team] : '#ffe9a8';
   d.innerHTML = `${m.teamOnly ? '<b style="color:#8fe08f">' + esc(t('tag_team')) + '</b> ' : ''}<b style="color:${col}">${esc(m.name)}</b>: ${esc(m.text)}`;
   log.appendChild(d);
   setTimeout(() => d.remove(), 12000);
@@ -1974,7 +2253,7 @@ function addChat(m) {
 }
 function openChat(team) {
   if (!joined) return;
-  chatTeam = team && matchInfo.mode === 'tdm';
+  chatTeam = team && isTeamMode(matchInfo.mode);
   chatOpen = true;
   const inp = $('x-chatin');
   inp.value = '';
@@ -2080,7 +2359,7 @@ function initPreview() {
 function setPreviewClass(id) {
   if (!pv) return;
   if (pv.rig) pv.sc.remove(pv.rig.root);
-  const rig = makeRig(id, '', 0);
+  const rig = makeRig(id, '', 0, prof && !prof.guest ? prof.equipped : null);
   scene.remove(rig.root); // makeRig 는 게임 장면에 넣어 버리므로 미리보기 장면으로 옮김
   rig.label.visible = false;
   rig.cls = id;
@@ -2150,7 +2429,7 @@ function updateModeBtn() {
   $('m-invite').style.display = host && !matchInfo.practice ? '' : 'none';
   $('m-invite').textContent = t('invite_btn');
   if (host) {
-    b.textContent = `${t('host_mode')} → ${t(matchInfo.mode === 'tdm' ? 'mode_ffa' : 'mode_tdm')}`;
+    b.textContent = `${t('host_mode')} → ${t('mode_' + MODE_LIST[(MODE_LIST.indexOf(matchInfo.mode) + 1) % MODE_LIST.length])}`;
     $('m-botadd').textContent = `${t('host_botadd')} · ${matchInfo.botTarget || 0}`;
     $('m-botsub').textContent = `${t('host_botsub')}`;
     $('m-diff').textContent = `${t('host_diff')} → ${t('ai_lv' + (((matchInfo.botDiff || 3) % 5) + 1))}`;
@@ -2164,17 +2443,17 @@ $('m-invite').onclick = () => send({ t: 'invite' });
 $('m-map').onclick = () => send({ t: 'setroom', map: MAP_IDS[(MAP_IDS.indexOf(matchInfo.map) + 1) % MAP_IDS.length] });
 setInterval(updateMatchHud, 500);
 setInterval(updateModeBtn, 500);
-$('m-mode').onclick = () => send({ t: 'setmode', mode: matchInfo.mode === 'tdm' ? 'ffa' : 'tdm' });
+$('m-mode').onclick = () => send({ t: 'setmode', mode: MODE_LIST[(MODE_LIST.indexOf(matchInfo.mode) + 1) % MODE_LIST.length] });
 /* ── 방 목록 / 방 만들기 ── */
 function fillRoomForm() {
-  $('rc-mode').innerHTML = ['ffa', 'tdm'].map((x) => `<option value="${x}">${esc(t('mode_' + x))}</option>`).join('');
+  $('rc-mode').innerHTML = MODE_LIST.map((x) => `<option value="${x}">${esc(t('mode_' + x))}</option>`).join('');
   $('rc-map').innerHTML = MAP_IDS.map((x) => `<option value="${x}">${esc(t('map_' + x))}</option>`).join('');
   const lvOpts = (sel) => [1, 2, 3, 4, 5].map((n) => `<option value="${n}"${n === (sel || 3) ? ' selected' : ''}>${esc(t('ai_lv' + n))}</option>`).join('');
   const cnt = (list, sel, label) => list.map((n) => `<option value="${n}"${n === sel ? ' selected' : ''}>${esc(label)}: ${n}</option>`).join('');
   const prev = { pb: $('pr-bots').value, pd: $('pr-diff').value, pm: $('pr-mode').value, pp: $('pr-map').value, rb: $('rc-bots').value, rd: $('rc-diff').value };
   $('pr-bots').innerHTML = cnt([1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15], 5, t('ai_count'));
   $('pr-diff').innerHTML = lvOpts(3);
-  $('pr-mode').innerHTML = ['ffa', 'tdm'].map((x) => `<option value="${x}">${esc(t('mode_' + x))}</option>`).join('');
+  $('pr-mode').innerHTML = MODE_LIST.map((x) => `<option value="${x}">${esc(t('mode_' + x))}</option>`).join('');
   $('pr-map').innerHTML = MAP_IDS.map((x) => `<option value="${x}">${esc(t('map_' + x))}</option>`).join('');
   $('rc-bots').innerHTML = cnt([0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15], 0, t('ai_count'));
   $('rc-diff').innerHTML = lvOpts(3);
@@ -2508,6 +2787,7 @@ function update(dt, nowMs) {
       blocking: r.blocking && r.alive && !rs, pitch: r.pitch,
       onStep: () => stepSnd(volFor(r.id, 0.08)),
     });
+    if (r.capeG) r.capeG.rotation.x = 0.1 + Math.min(r.v, 8) * 0.05 + Math.sin(nowMs * 0.006 + r.id) * 0.03;
     r.fall = lerp(r.fall, r.alive ? 0 : 1, Math.min(1, dt * 8));
     r.root.rotation.x = r.fall * (Math.PI / 2);
     r.label.visible = r.alive;
@@ -2517,6 +2797,7 @@ function update(dt, nowMs) {
   }
   updateFx(dt);
   updateShots(dt);
+  updateObjects(nowMs);
 
   if (joined) {
     updateHudFrame(nowMs, dt);
@@ -2525,7 +2806,7 @@ function update(dt, nowMs) {
     if (dead) {
       const left = Math.max(0, Math.ceil((deadUntil - nowMs) / 1000));
       const di = deathInfo;
-      let html = esc(t('died')) + `<small>${esc(t('killedBy', { n: killerName, s: left }))}</small>`;
+      let html = esc(t('died')) + `<small>${esc(matchInfo.round_wait || ['survival', 'king'].includes(matchInfo.mode) ? t('killedBy_round', { n: killerName }) : t('killedBy', { n: killerName, s: left }))}</small>`;
       if (di) {
         const lastS = di.tag === 'counter' ? t('di_counter') : di.skill ? sname(SKILLS[di.skill]) : t('di_basic');
         html += `<small class="di">${esc(t('di_main', { n: di.name, c: cname(CLASSES[di.cls]), d: di.dmg, h: di.hits }))}</small>`
