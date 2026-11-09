@@ -65,7 +65,7 @@ const httpServer = http.createServer((req, res) => {
   if (url === '/classes.js') return sendFile(req, res, path.join(__dirname, 'classes.js'));
   if (url === '/rooms.json') {
     res.writeHead(200, { 'Content-Type': MIME['.json'], 'Cache-Control': 'no-cache' });
-    return res.end(JSON.stringify({ list: [...rooms.values()].map((r) => r.info()), maps: Object.values(MAPS).map((x) => ({ id: x.id })) }));
+    return res.end(JSON.stringify({ list: [...rooms.values()].filter((r) => !r.practice).map((r) => r.info()), maps: Object.values(MAPS).map((x) => ({ id: x.id })) }));
   }
   if (url === '/config.json') {
     res.writeHead(200, { 'Content-Type': MIME['.json'], 'Cache-Control': 'no-cache' });
@@ -117,6 +117,9 @@ class Room {
     this.vote = null;
     this.timers = new Set();
     this.projs = [];
+    this.botTarget = 0;           // 방장이 정한 AI 수
+    this.botDiff = 3;             // AI 난이도 1~5
+    this.practice = false;        // 연습모드(혼자 하는 비공개 방)
     this.setMap(mapId);
     this.endsAt = now() + MATCH.durationMs;
   }
@@ -131,20 +134,32 @@ class Room {
     const s = JSON.stringify(msg);
     for (const p of this.players.values()) if (p.ws.readyState === 1) p.ws.send(s);
   }
+  get humans() { let n = 0; for (const p of this.players.values()) if (!p.bot) n++; return n; }
+  get botCount() { return this.players.size - this.humans; }
+  // 방장이 정한 AI 수만큼 채움 (사람이 들어오면 자리를 양보)
+  syncBots() {
+    const want = this.custom ? Math.min(this.botTarget, Math.max(0, this.max - this.humans)) : 0;
+    const bots = [...this.players.values()].filter((p) => p.bot);
+    let changed = false;
+    while (bots.length > want) { this.players.delete(bots.pop().id); changed = true; }
+    while (bots.length < want) { bots.push(addBot(this)); changed = true; }
+    if (changed) { this.broadcast({ t: 'roster', list: this.roster() }); this.broadcast(this.matchState()); }
+  }
   get limit() { return this.mode === 'tdm' ? MATCH.teamKills : MATCH.ffaKills; }
   isFoe(a, b) { return this.mode === 'ffa' || a.team !== b.team; }
   roster() {
-    return [...this.players.values()].map((p) => ({ id: p.id, name: p.name, cls: p.cls, team: p.team, kills: p.kills, deaths: p.deaths, user: !!p.userId }));
+    return [...this.players.values()].map((p) => ({ id: p.id, name: p.name, cls: p.cls, team: p.team, kills: p.kills, deaths: p.deaths, user: !!p.userId, bot: !!p.bot }));
   }
   matchState() {
     return {
       t: 'match', mode: this.mode, map: this.mapId, limit: this.limit, teamScore: this.teamScore, over: this.over,
       hostId: this.custom ? this.hostId : null, custom: this.custom, room: this.name,
+      bots: this.botCount, botTarget: this.botTarget, botDiff: this.botDiff, practice: this.practice,
       remainMs: this.over ? 0 : Math.max(0, this.endsAt - now()), durationMs: MATCH.durationMs,
     };
   }
   info() {
-    return { id: this.id, name: this.name, custom: this.custom, mode: this.mode, map: this.mapId, count: this.players.size, max: this.max, locked: !!this.password };
+    return { id: this.id, name: this.name, custom: this.custom, mode: this.mode, map: this.mapId, count: this.humans, bots: this.botCount, botDiff: this.botDiff, max: this.max, locked: !!this.password };
   }
   assignTeam() {
     if (this.mode === 'ffa') return 0;
@@ -162,7 +177,10 @@ class Room {
   }
   refreshHost() {
     if (!this.custom) return;
-    if (!this.players.has(this.hostId)) this.hostId = this.players.size ? Math.min(...this.players.keys()) : null;
+    if (!this.players.has(this.hostId) || this.players.get(this.hostId).bot) {
+      const ids = [...this.players.values()].filter((p) => !p.bot).map((p) => p.id);
+      this.hostId = ids.length ? Math.min(...ids) : null;
+    }
   }
   allyTargets(p, radius) {
     const list = [p];
@@ -207,7 +225,7 @@ class Room {
       draw: !!draw, teamScore: this.teamScore, board, nextMs,
     });
     this.broadcast(this.matchState());
-    recordMatch({
+    if (this.botCount === 0) recordMatch({ // AI가 섞인 판은 전적에 기록하지 않음(연습용)
       mode: this.mode, winner_team: winnerTeam ?? null,
       rows: [...this.players.values()].map((p) => ({
         user_id: p.userId || null, name: p.name, class_id: p.cls, team: p.team, kills: p.kills, deaths: p.deaths,
@@ -293,6 +311,7 @@ function kill(p, q) {
   const rm = p.room;
   q.alive = false; q.blocking = false; q.stunUntil = 0; q.buffUntil = 0;
   q.deaths++; p.kills++;
+  if (q.bot && Math.random() < 0.5) q.nextCls = BOT_CLASSES[Math.floor(Math.random() * BOT_CLASSES.length)];
   if (rm.mode === 'tdm') rm.teamScore[p.team]++;
   rm.broadcast({ t: 'kill', killer: p.id, victim: q.id });
   rm.broadcast({ t: 'roster', list: rm.roster() });
@@ -441,6 +460,25 @@ function respawn(rm, id, force = false) {
   rm.broadcast({ t: 'respawn', id: q.id, cls: q.cls, x: s.x, y: s.y, z: s.z, yaw: s.yaw, hp: q.hp });
 }
 
+// 기본 공격 (사람과 AI 공용)
+function doAttack(p) {
+  const rm = p.room;
+  if (!p.alive || isStunned(p) || rm.over) return false;
+  const c = CLASSES[p.cls];
+  const t = now();
+  if (t - p.lastAttack < c.cooldown * 1000 - 30) return false;
+  p.lastAttack = t;
+  p.blocking = false;
+  rm.broadcast({ t: 'swing', id: p.id });
+  const cos = Math.cos(((c.cone ?? 50) * Math.PI) / 180);
+  rm.later(() => {
+    const counter = p.counterUntil > now();
+    if (counter) p.counterUntil = 0;
+    strike(p, { reach: c.reach, cos, ranged: !!c.ranged, proj: c.proj, counter, ignoreBlock: counter, dmg: Math.round(c.damage * dmgMult(p)) });
+  }, c.windup * 1000);
+  return true;
+}
+
 function useSkill(p, slot) {
   const rm = p.room;
   const c = CLASSES[p.cls];
@@ -489,21 +527,174 @@ function useSkill(p, slot) {
   }, def.windup * 1000);
 }
 
+
+/* ───────────── AI 봇 ─────────────
+   서버가 직접 움직이는 가짜 플레이어. 난이도 1~5:
+   react 반응속도(초) / turn 회전속도(rad/s) / err 조준 오차(rad) / speed 이동 배율 /
+   block 상대 공격을 보고 방어(패링)할 확률 / skill 스킬 사용 확률 / kick 발차기 확률 / strafe 좌우 움직임 */
+const AI_LEVELS = [null,
+  { react: 0.95, turn: 2.6, err: 0.40, speed: 0.70, block: 0.04, skill: 0.20, kick: 0.05, strafe: 0.0 },
+  { react: 0.65, turn: 4.0, err: 0.26, speed: 0.80, block: 0.12, skill: 0.35, kick: 0.12, strafe: 0.3 },
+  { react: 0.42, turn: 6.0, err: 0.15, speed: 0.90, block: 0.25, skill: 0.55, kick: 0.22, strafe: 0.6 },
+  { react: 0.26, turn: 9.0, err: 0.075, speed: 1.00, block: 0.38, skill: 0.75, kick: 0.35, strafe: 0.85 },
+  { react: 0.15, turn: 14.0, err: 0.03, speed: 1.06, block: 0.50, skill: 0.92, kick: 0.5, strafe: 1.0 },
+];
+const BOT_WS = { readyState: 0, close() {}, send() {} };
+const BOT_CLASSES = Object.keys(CLASSES);
+const rnd = (a, b) => a + Math.random() * (b - a);
+const wrapAngle = (a) => { while (a > Math.PI) a -= Math.PI * 2; while (a < -Math.PI) a += Math.PI * 2; return a; };
+
+function addBot(rm) {
+  const id = nextId++;
+  const cls = BOT_CLASSES[Math.floor(Math.random() * BOT_CLASSES.length)];
+  const p = {
+    id, ws: BOT_WS, room: rm, name: 'Knight', cls, team: rm.assignTeam(), userId: null, bot: true, x: 0, y: 0, z: 0, yaw: 0, pitch: 0,
+    hp: CLASSES[cls].hp, alive: true, blocking: false, blockSince: 0, kills: 0, deaths: 0, lastAttack: 0,
+    lastState: now(), lastChat: 0, lastEmote: 0, stunUntil: 0, buffUntil: 0, buffDmg: 1, buffSpeed: 1,
+    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), nextCls: null, stance: 0,
+    ai: { target: null, retargetAt: 0, actAt: 0, skillAt: 0, strafe: 1, strafeAt: 0, errYaw: 0, errPitch: 0, errAt: 0, blockAt: 0, blockEnd: 0, seen: 0, dash: null, avoidUntil: 0, avoidDir: 1, lx: 0, lz: 0, lcheck: 0 },
+  };
+  Object.assign(p, rm.spawnFor(p));
+  rm.players.set(id, p);
+  return p;
+}
+
+Room.prototype.stepBots = function stepBots(dt) {
+  if (this.over) return;
+  const t = now();
+  for (const p of this.players.values()) if (p.bot && p.alive) botThink(this, p, dt, t);
+};
+
+function botSkill(rm, p, tg, d, los, aligned, L, t) {
+  const c = CLASSES[p.cls], id = c.skill, def = SKILLS[id];
+  if (!def || t < (p.cds[id] || 0)) return false;
+  const a = p.ai;
+  let use = false;
+  if (def.heal) use = p.hp < c.hp * 0.6;
+  else if (def.dur) use = d < 14;
+  else {
+    const reach = def.reach ?? c.reach + (def.reachAdd || 0);
+    if (def.blink) use = los && aligned && d > 3.5 && d < def.blink + reach;
+    else if (def.dash) use = aligned && d > 2.2 && d < def.dash.speed * def.dash.dur + reach * 0.8;
+    else if (reach > 6) use = los && aligned && d <= reach * 0.95;
+    else use = aligned && d <= reach + 0.3;
+  }
+  if (!use) return false;
+  useSkill(p, 'q');
+  if (def.dash) a.dash = { dx: -Math.sin(p.yaw), dz: -Math.cos(p.yaw), speed: def.dash.speed, end: t + def.dash.dur * 1000 };
+  return true;
+}
+
+function botThink(rm, p, dt, t) {
+  const L = AI_LEVELS[rm.botDiff] || AI_LEVELS[3];
+  const a = p.ai, c = CLASSES[p.cls];
+  if (isStunned(p)) { p.blocking = false; a.dash = null; return; }
+
+  // 돌진 중에는 그 방향으로 이동
+  if (a.dash) {
+    if (t >= a.dash.end) a.dash = null;
+    else { [p.x, p.z] = resolveCollision(p.x + a.dash.dx * a.dash.speed * dt, p.z + a.dash.dz * a.dash.speed * dt, PLAYER.radius, rm.map); return; }
+  }
+
+  // 목표 선택: 가까운 적 (사람을 약간 우선, 시야가 막히면 불리)
+  let tg = a.target && a.target.alive && rm.players.has(a.target.id) && rm.isFoe(p, a.target) ? a.target : null;
+  if (!tg || t >= a.retargetAt) {
+    let best = null, bs = Infinity;
+    for (const q of rm.players.values()) {
+      if (q === p || !q.alive || !rm.isFoe(p, q)) continue;
+      const sc = Math.hypot(q.x - p.x, q.z - p.z) + (q.bot ? 0 : -5) + (lineBlocked(p.x, p.z, q.x, q.z, rm.map) ? 8 : 0);
+      if (sc < bs) { bs = sc; best = q; }
+    }
+    if (best !== tg) a.actAt = Math.max(a.actAt, t + L.react * 1000 * rnd(0.8, 1.3)); // 새 목표를 보고 반응하는 시간
+    tg = best;
+    a.target = best;
+    a.retargetAt = t + rnd(900, 1800);
+  }
+  if (!tg) { p.blocking = false; return; }
+
+  const dx = tg.x - p.x, dz = tg.z - p.z;
+  const d = Math.hypot(dx, dz) || 0.001;
+  const los = !lineBlocked(p.x, p.z, tg.x, tg.z, rm.map);
+
+  // 조준 (회전 속도와 오차는 난이도에 따라)
+  if (t >= a.errAt) { a.errYaw = rnd(-L.err, L.err); a.errPitch = rnd(-L.err, L.err) * 0.5; a.errAt = t + rnd(400, 900); }
+  const want = Math.atan2(-dx, -dz) + a.errYaw;
+  const diff = wrapAngle(want - p.yaw);
+  p.yaw += clamp(diff, -L.turn * dt, L.turn * dt);
+  const aimDiff = Math.abs(wrapAngle(Math.atan2(-dx, -dz) - p.yaw));
+  p.pitch = c.ranged ? clamp(Math.atan2(tg.y + 1.2 - (p.y + 1.45), d) + a.errPitch, -0.6, 0.6) : 0;
+  const halfCone = ((c.cone ?? 50) * Math.PI) / 180;
+  const aligned = c.ranged ? aimDiff < 0.12 + L.err : aimDiff < Math.min(halfCone * 0.7, 0.6);
+
+  // 방어/패링: 상대가 막 공격을 시작한 걸 보면 (반응 시간 뒤) 방어를 올림
+  if (!p.blocking && t >= a.blockAt && a.blockAt > 0) { p.blocking = true; p.blockSince = t; a.blockEnd = t + rnd(450, 800); a.blockAt = 0; }
+  if (p.blocking && t >= a.blockEnd) p.blocking = false;
+  if (!p.blocking && a.blockAt === 0) {
+    for (const q of rm.players.values()) {
+      if (q === p || !q.alive || !rm.isFoe(p, q) || q.lastAttack === a.seen) continue;
+      const qc = CLASSES[q.cls];
+      if (qc.ranged || t - q.lastAttack > 300 || Math.hypot(q.x - p.x, q.z - p.z) > qc.reach + 1.6) continue;
+      a.seen = q.lastAttack;
+      if (Math.random() < L.block) a.blockAt = t + L.react * 1000 * 0.45;
+      break;
+    }
+  }
+
+  // 이동
+  const stuck = t >= a.lcheck;
+  if (stuck) {
+    if (Math.hypot(p.x - a.lx, p.z - a.lz) < 0.25 && d > 2.5) { a.avoidUntil = t + 800; a.avoidDir = Math.random() < 0.5 ? 1 : -1; }
+    a.lx = p.x; a.lz = p.z; a.lcheck = t + 600;
+  }
+  if (t >= a.strafeAt) { a.strafe = Math.random() < 0.5 ? 1 : -1; a.strafeAt = t + rnd(1000, 2400); }
+  const ux = dx / d, uz = dz / d;        // 목표 방향
+  const sx = -uz * a.strafe, sz = ux * a.strafe; // 옆 방향
+  const prefer = c.ranged ? Math.max(6, c.reach * 0.55) : c.reach * 0.8;
+  let mx = 0, mz = 0;
+  if (d > prefer * (c.ranged ? 1.35 : 1) || !los) { mx = ux; mz = uz; }
+  else if (c.ranged && d < prefer * 0.55) { mx = -ux * 0.8; mz = -uz * 0.8; }
+  mx += sx * 0.7 * L.strafe; mz += sz * 0.7 * L.strafe;
+  if (t < a.avoidUntil) { const ca = Math.cos(1.3 * a.avoidDir), sa = Math.sin(1.3 * a.avoidDir); [mx, mz] = [mx * ca - mz * sa, mx * sa + mz * ca]; }
+  const ml = Math.hypot(mx, mz);
+  if (ml > 0.01) {
+    const v = c.speed * L.speed * (p.buffUntil > t ? p.buffSpeed : 1) * (p.blocking ? 0.55 : 1) * (d > prefer * 1.6 && !p.blocking ? 1.35 : 1);
+    [p.x, p.z] = resolveCollision(p.x + (mx / ml) * v * dt, p.z + (mz / ml) * v * dt, PLAYER.radius, rm.map);
+  }
+
+  // 공격 / 스킬 / 발차기
+  if (p.blocking || t < a.actAt) return;
+  if (t >= a.skillAt) {
+    a.skillAt = t + rnd(600, 1400);
+    if (Math.random() < L.skill && botSkill(rm, p, tg, d, los, aligned, L, t)) { a.actAt = t + 350; return; }
+  }
+  if (d < 2.1 && tg.blocking && Math.random() < L.kick * 0.25) { useSkill(p, 'e'); a.actAt = t + 300; return; }
+  const inReach = c.ranged ? d <= c.reach * 0.95 && los : d <= c.reach + 0.3;
+  if (inReach && aligned && doAttack(p)) a.actAt = t + c.cooldown * 1000 * rnd(1.0, 1.2) + L.react * 150;
+}
+
 /* ───────────── 입장 / 방 관리 ───────────── */
 function sanitizeCreate(cr) {
   const name = cleanText(cr?.name, ROOM.nameLen) || 'Custom Room';
   const mode = MODES.includes(cr?.mode) ? cr.mode : 'ffa';
   const mapId = MAPS[cr?.map] ? cr.map : 'town';
-  const max = clamp(Math.floor(Number(cr?.max) || 8), 2, ROOM.maxCustomPlayers);
-  const password = cleanText(cr?.password, ROOM.passLen);
-  return { name, mode, mapId, max, password };
+  let max = clamp(Math.floor(Number(cr?.max) || 8), 2, ROOM.maxCustomPlayers);
+  if (cr?.practice) max = clamp(Math.floor(Number(cr?.bots) || 5) + 1, 2, ROOM.maxCustomPlayers);
+  const password = cr?.practice ? Math.random().toString(36).slice(2, 10) : cleanText(cr?.password, ROOM.passLen); // 연습방은 비공개
+  const practice = !!cr?.practice;
+  const bots = clamp(Math.floor(Number(cr?.bots) || 0), practice ? 1 : 0, max - 1);
+  const botDiff = clamp(Math.floor(Number(cr?.botDiff) || 3), 1, 5);
+  return { name, mode, mapId, max, password, practice, bots, botDiff };
 }
 
 function joinRoom(ws, user, m) {
   let room;
   if (m.create) {
     if (rooms.size >= ROOM.maxRooms) return send(ws, { t: 'error', code: 'toomanyrooms' });
-    room = new Room({ ...sanitizeCreate(m.create), custom: true });
+    const cfg = sanitizeCreate(m.create);
+    room = new Room({ ...cfg, custom: true });
+    room.practice = cfg.practice;
+    room.botTarget = cfg.bots;
+    room.botDiff = cfg.botDiff;
     rooms.set(room.id, room);
   } else if (m.room) {
     room = rooms.get(String(m.room));
@@ -513,6 +704,10 @@ function joinRoom(ws, user, m) {
     // 방을 지정하지 않으면 자리가 있는 공개 방 중 사람이 가장 많은 곳
     const open = [...rooms.values()].filter((r) => !r.custom && r.players.size < r.max).sort((a, b) => b.players.size - a.players.size);
     room = open[0];
+  }
+  if (room && room.players.size >= room.max && room.humans < room.max) { // 자리가 없으면 AI가 양보
+    const bot = [...room.players.values()].find((x) => x.bot);
+    if (bot) room.players.delete(bot.id);
   }
   if (!room || room.players.size >= room.max) return send(ws, { t: 'full' });
   if (user) for (const r of rooms.values()) for (const o of r.players.values()) if (o.userId === user.id) o.ws.close();
@@ -531,6 +726,7 @@ function joinRoom(ws, user, m) {
   ws.pid = id;
   ws.room = room;
   if (room.custom && room.hostId == null) room.hostId = id; // 방을 만든 사람이 방장
+  room.syncBots();
   send(ws, {
     t: 'welcome', id, cls, team: p.team, x: p.x, y: p.y, z: p.z, yaw: p.yaw, hp: p.hp,
     roster: room.roster(), authed: !!user, db: dbEnabled, room: room.info(), map: room.mapId,
@@ -552,7 +748,7 @@ wss.on('connection', (ws) => {
 
     if (m.t === 'ping') return send(ws, { t: 'pong', ts: m.ts });
     if (m.t === 'rooms') {
-      return send(ws, { t: 'roomlist', list: [...rooms.values()].map((r) => r.info()), maps: Object.values(MAPS).map((x) => ({ id: x.id, name: x.name })) });
+      return send(ws, { t: 'roomlist', list: [...rooms.values()].filter((r) => !r.practice).map((r) => r.info()), maps: Object.values(MAPS).map((x) => ({ id: x.id, name: x.name })) });
     }
 
     if (m.t === 'join') {
@@ -588,19 +784,7 @@ wss.on('connection', (ws) => {
       p.blocking = wantBlock;
       p.stance = m.c === 1 || m.c === 2 ? m.c : 0; // 0 서기 / 1 웅크리기 / 2 슬라이딩
     } else if (m.t === 'attack') {
-      if (!p.alive || isStunned(p) || rm.over) return;
-      const c = CLASSES[p.cls];
-      const t = now();
-      if (t - p.lastAttack < c.cooldown * 1000 - 30) return;
-      p.lastAttack = t;
-      p.blocking = false;
-      rm.broadcast({ t: 'swing', id: p.id });
-      const cos = Math.cos(((c.cone ?? 50) * Math.PI) / 180);
-      rm.later(() => {
-        const counter = p.counterUntil > now();
-        if (counter) p.counterUntil = 0;
-        strike(p, { reach: c.reach, cos, ranged: !!c.ranged, proj: c.proj, counter, ignoreBlock: counter, dmg: Math.round(c.damage * dmgMult(p)) });
-      }, c.windup * 1000);
+      doAttack(p);
     } else if (m.t === 'skill') {
       if (!p.alive || isStunned(p) || rm.over) return;
       if (m.slot !== 'q' && m.slot !== 'e') return;
@@ -627,6 +811,12 @@ wss.on('connection', (ws) => {
       rm.broadcast({ t: 'emote', id: p.id, e: m.e });
     } else if (m.t === 'vote') {
       rm.castVote(p, m);
+    } else if (m.t === 'setbots') {
+      if (!rm.custom || p.id !== rm.hostId) return;
+      if (Number.isFinite(Number(m.count))) rm.botTarget = clamp(Math.floor(Number(m.count)), rm.practice ? 1 : 0, rm.max - 1);
+      if (Number.isFinite(Number(m.diff))) rm.botDiff = clamp(Math.floor(Number(m.diff)), 1, 5);
+      rm.syncBots();
+      rm.broadcast(rm.matchState());
     } else if (m.t === 'setmode' || m.t === 'setroom') {
       // 방장 방에서만, 방장만 모드·맵을 바꿀 수 있음 (공개 방은 투표로만 바뀜)
       if (!rm.custom || p.id !== rm.hostId) return;
@@ -644,18 +834,20 @@ wss.on('connection', (ws) => {
     rm.players.delete(p.id);
     if (rm.vote) rm.vote.votes.delete(p.id);
     rm.refreshHost();
-    if (rm.custom && !rm.players.size) { rm.destroy(); console.log(`[x] 방 삭제: ${rm.name}`); }
+    if (rm.humans) rm.syncBots();
+    if (rm.custom && !rm.humans) { rm.destroy(); console.log(`[x] 방 삭제: ${rm.name}`); }
     else { rm.broadcast({ t: 'roster', list: rm.roster() }); rm.broadcast(rm.matchState()); }
     console.log(`[-] ${p.name} 퇴장 (${rm.name}) — ${rm.players.size}명`);
   });
 });
 
 /* ───────────── 주기 작업 ───────────── */
-setInterval(() => { for (const rm of rooms.values()) rm.stepProjs(0.025); }, 25); // 투사체 비행 계산 (40Hz)
+setInterval(() => { for (const rm of rooms.values()) rm.stepProjs(0.025); }, 25);
+setInterval(() => { for (const rm of rooms.values()) if (rm.humans && rm.botCount) rm.stepBots(0.05); }, 50); // AI 판단 (20Hz) // 투사체 비행 계산 (40Hz)
 
 setInterval(() => { // 20Hz 스냅샷
   for (const rm of rooms.values()) {
-    if (!rm.players.size) continue;
+    if (!rm.humans) continue;
     rm.broadcast({
       t: 'snap',
       p: [...rm.players.values()].map((p) => ({
@@ -671,7 +863,7 @@ setInterval(() => { // 0.25초마다 시간 종료 확인, 5초마다 남은 시
   tickCount++;
   for (const rm of rooms.values()) {
     if (rm.over) continue;
-    if (!rm.players.size) { rm.endsAt = now() + MATCH.durationMs; continue; } // 빈 방은 시간이 흐르지 않음
+    if (!rm.humans) { rm.endsAt = now() + MATCH.durationMs; continue; } // 빈 방은 시간이 흐르지 않음
     if (now() >= rm.endsAt) rm.timeUp();
     else if (tickCount % 20 === 0) rm.broadcast(rm.matchState());
   }
