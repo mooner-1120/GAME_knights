@@ -59,7 +59,8 @@ const UI = {
   host_mode: ['Switch mode (host)', '모드 변경 (방장)', 'モード切替(ホスト)', '切换模式(房主)', 'Cambiar modo (anfitrión)'],
   // 조작법
   k_move: ['Move', '이동', '移動', '移动', 'Mover'],
-  k_sprint: ['Sprint (uses stamina, not while blocking)', '달리기 (스태미나 소모, 방어 중엔 불가)', 'ダッシュ(スタミナ消費・防御中不可)', '奔跑(消耗体力,防御时不可)', 'Correr (gasta aguante, no al bloquear)'],
+  k_sprint: ['Sprint (hold, unlimited; not while blocking)', '달리기 (누르고 있기, 무제한 / 방어 중엔 불가)', 'ダッシュ(長押し・無制限/防御中不可)', '奔跑(按住,无限制;防御时不可)', 'Correr (mantener, sin límite; no al bloquear)'],
+  k_crouch: ['Crouch (hold) · Slide (press while sprinting)', '웅크리기 (누르고 있기) · 슬라이딩 (달리는 중 누르기)', 'しゃがみ(長押し)・スライディング(ダッシュ中に押す)', '蹲下(按住)· 滑铲(奔跑时按下)', 'Agacharse (mantener) · Deslizarse (pulsar al correr)'],
   k_jump: ['Jump', '점프', 'ジャンプ', '跳跃', 'Saltar'],
   k_attack: ['Left click: attack', '마우스 좌클릭: 공격', '左クリック: 攻撃', '鼠标左键:攻击', 'Clic izquierdo: atacar'],
   k_block: ['Right click / F (hold): block. Tap it right before a hit to PARRY, then counter!', '우클릭 / F (누르고 있기): 방어. 맞기 직전에 눌러 패링하고 반격하세요!', '右クリック/F(長押し):防御。攻撃直前に押してパリィ→反撃!', '右键 / F(按住):防御。在被击中前按下可招架并反击!', 'Clic derecho / F (mantener): bloquear. ¡Púlsalo justo antes del golpe para parar y contraatacar!'],

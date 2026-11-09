@@ -776,10 +776,20 @@ function animateRig(r, dt, o) {
     lz = sv.c;
   }
 
+  // 웅크리기 / 슬라이딩 자세 (부드럽게 전환): 엉덩이를 낮추고 다리를 앞으로 뻗음
+  r.crK = lerp(r.crK || 0, o.stance === 1 ? 1 : 0, Math.min(1, dt * 12));
+  r.slK = lerp(r.slK || 0, o.stance === 2 ? 1 : 0, Math.min(1, dt * 12));
+  let hipY = 0.675;
+  if (r.crK > 0.01 || r.slK > 0.01) {
+    legR = lerp(legR, 0.85, r.crK); legL = lerp(legL, 0.6, r.crK); ln = lerp(ln, -0.25, r.crK);
+    legR = lerp(legR, 1.35, r.slK); legL = lerp(legL, 1.35, r.slK); ln = lerp(ln, 0.95, r.slK);
+    hipY = lerp(lerp(0.675, 0.47, r.crK), 0.2, r.slK);
+  }
+  r.legR.position.y = r.legL.position.y = hipY;
   r.legR.rotation.x = legR;
   r.legL.rotation.x = legL;
   r.upper.rotation.set(ln, tw + spin, 0);
-  r.upper.position.y = 0.675 + (o.air ? 0 : Math.abs(Math.cos(r.phase)) * 0.02 * amp);
+  r.upper.position.y = hipY + (o.air || hipY < 0.6 ? 0 : Math.abs(Math.cos(r.phase)) * 0.02 * amp);
   r.armR.rotation.set(armR, 0, rz);
   r.armL.rotation.set(armL, 0, lz);
   r.sword.rotation.x = -Math.PI / 2 + wr;
@@ -839,8 +849,8 @@ function updateFx(dt) {
 const me = {
   id: null, cls: 'knight', x: 0, y: 0, z: 0, vy: 0, yaw: 0, pitch: 0,
   hp: 100, alive: false, blocking: false, lastAtk: 0, onGround: true,
-  stamina: PLAYER.staminaMax, exhausted: false, regenWait: 0, sprinting: false,
-  sprintB: 0, blockB: 0, act: null, dash: null, stunUntil: 0, buffUntil: 0, buffSpeed: 1, counterUntil: 0, team: 0, cd: {},
+  sprinting: false,
+  sprintB: 0, slide: null, crouching: false, slideCd: 0, eyeH: PLAYER.eye, slideTilt: 0, blockB: 0, act: null, dash: null, stunUntil: 0, buffUntil: 0, buffSpeed: 1, counterUntil: 0, team: 0, cd: {},
   bobPhase: 0, mv: 0, stepIdx: 0, kick: 0, roll: 0, shake: 0, fovK: 0, pendingCls: null,
   streak: 0, ping: 0, debugCam: false,
 };
@@ -852,6 +862,7 @@ let deadUntil = 0;
 let killerName = '';
 let mouseR = false;
 let pendingJoin = {};
+let crouchPress = false;
 let touchPaused = false;
 let vote = null;
 let chatOpen = false, chatTeam = false, emoteOpen = false, emoteTimer = 0, endTimer = 0;
@@ -1052,6 +1063,7 @@ const bowShot = safe((vol = 0.2) => { // 활시위 튕김 + 화살이 공기를 
   tone('triangle', 260, 120, 0.22, vol * 0.8, 0.003, 1400);
   noiseBurst(0.18, 700, 2200, vol * 0.5, 'bandpass', 1.3, 0.03);
 });
+const slideSnd = safe((vol = 0.2) => { noiseBurst(0.55, 1100, 260, vol * 0.8, 'bandpass', 0.8, 0.05); tone('sine', 110, 70, 0.3, vol * 0.4, 0.02); });
 const spellCast = safe((vol = 0.2) => { // 부드러운 마법 시전음
   tone('sine', 360, 820, 0.4, vol * 0.7, 0.05);
   tone('sine', 540, 1230, 0.4, vol * 0.35, 0.06, 3000);
@@ -1185,8 +1197,6 @@ function updateHudFrame(nowMs, dt) {
       s.el.classList.toggle('ready', rem <= 0);
     }
   }
-  $('stfill').style.width = `${(me.stamina / PLAYER.staminaMax) * 100}%`;
-  $('stbar').classList.toggle('tired', me.exhausted);
 
   hudTick += dt;
   if (hudTick > 0.15) {
@@ -1196,7 +1206,6 @@ function updateHudFrame(nowMs, dt) {
     if (nowMs < me.buffUntil) items.push(t('st_buff', { s: ((me.buffUntil - nowMs) / 1000).toFixed(1) }));
     if (nowMs < me.counterUntil) items.push(t('st_counter'));
     if (nowMs < me.stunUntil) items.push(t('st_stun'));
-    if (me.exhausted) items.push(t('st_tired'));
     if (st.dataset.k !== items.join('|')) {
       st.dataset.k = items.join('|');
       st.textContent = '';
@@ -1306,8 +1315,8 @@ function actorPos(id) {
 
 function resetLocal() {
   Object.assign(me, {
-    vy: 0, blocking: false, stamina: PLAYER.staminaMax, exhausted: false, regenWait: 0, sprinting: false,
-    sprintB: 0, blockB: 0, act: null, dash: null, stunUntil: 0, buffUntil: 0, cd: {}, kick: 0, roll: 0, shake: 0, fovK: 0, pendingCls: null,
+    vy: 0, blocking: false, sprinting: false,
+    sprintB: 0, slide: null, crouching: false, slideCd: 0, eyeH: PLAYER.eye, slideTilt: 0, blockB: 0, act: null, dash: null, stunUntil: 0, buffUntil: 0, cd: {}, kick: 0, roll: 0, shake: 0, fovK: 0, pendingCls: null,
   });
 }
 
@@ -1353,7 +1362,8 @@ function handle(m) {
         }
         const r = remotes.get(p.id);
         if (!r) continue;
-        r.tx = p.x; r.ty = p.y; r.tz = p.z; r.tyaw = p.yaw; r.tpitch = p.pitch; r.blocking = p.b; r.alive = p.alive;
+        r.tx = p.x; r.ty = p.y; r.tz = p.z; r.tyaw = p.yaw; r.tpitch = p.pitch; if ((p.c || 0) === 2 && r.stance !== 2) slideSnd(volFor(p.id, 0.2));
+        r.stance = p.c || 0; r.blocking = p.b; r.alive = p.alive;
         const pos = r.root.position;
         if (!r.init || Math.hypot(pos.x - p.x, pos.z - p.z) > 6) {
           pos.set(p.x, p.y, p.z); r.yaw = p.yaw; r.pitch = p.pitch; r.px = p.x; r.pz = p.z; r.init = true;
@@ -1640,6 +1650,7 @@ addEventListener('keydown', (e) => {
   if (joined && locked() && (e.code === 'Space' || e.code.startsWith('Arrow'))) e.preventDefault();
   keys[e.code] = true;
   if (e.repeat || !joined || !locked()) return;
+  if (e.code === 'KeyC') crouchPress = true;
   if (e.code === 'KeyQ') useSkill('q');
   if (e.code === 'KeyE') useSkill('e');
   if (emoteOpen) {
@@ -2087,6 +2098,7 @@ const BTN = {
   jump:   { label: '⤒', size: 40, right: 22, bottom: 128 },
   skill:  { label: 'Q', size: 40, right: 92, bottom: 86 },
   kick:   { label: 'E', size: 36, right: 148, bottom: 44 },
+  crouch: { label: '⬇', size: 34, right: 150, bottom: 92 },
   menu:   { label: '☰', size: 34, right: 8, top: 8 },
   chat:   { label: '💬', size: 34, right: 8, top: 48 },
   emote:  { label: '😀', size: 34, right: 8, top: 88 },
@@ -2179,6 +2191,7 @@ function initTouch() {
   mkb(BTN.jump, () => { keys.Space = true; }, () => { keys.Space = false; });
   mkb(BTN.skill, () => useSkill('q'));
   mkb(BTN.kick, () => useSkill('e'));
+  mkb(BTN.crouch, () => { keys.KeyC = true; crouchPress = true; }, () => { keys.KeyC = false; }); // 누르고 있으면 웅크리기, 달리는 중 누르면 슬라이딩
   mkb(BTN.menu, () => openTouchMenu());
   mkb(BTN.chat, () => openChat(false));
   mkb(BTN.emote, () => openEmoteList(true));
@@ -2197,6 +2210,7 @@ let sendTimer = 0;
 let fps = 0, fpsAcc = 0, fpsN = 0;
 let mmTick = 0;
 
+const endSlide = (nowMs) => { me.slide = null; me.slideCd = nowMs + 600; };
 function update(dt, nowMs) {
   const c = CLASSES[me.cls];
   const stunned = nowMs < me.stunUntil;
@@ -2205,23 +2219,27 @@ function update(dt, nowMs) {
 
   if (joined && me.alive) {
     const wasBlock = me.blocking;
-    me.blocking = !stunned && locked() && (mouseR || keys.KeyF === true) && !me.act;
+    me.blocking = !stunned && locked() && (mouseR || keys.KeyF === true) && !me.act && !me.slide;
     if (me.blocking && !wasBlock) sendTimer = 1; // 패링 타이밍을 위해 방어 시작을 즉시 전송
     const f = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
     const s = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
 
-    // 달리기 (Shift): 앞으로 갈 때만, 방어 중엔 불가, 스태미나 소모
+    // 달리기 (Shift): 앞으로 갈 때만, 방어 중엔 불가. 체력(스태미나) 소모 없이 계속 달릴 수 있음
     const wantSprint = !!(keys.ShiftLeft || keys.ShiftRight) && f > 0 && !me.blocking && !stunned && locked();
-    const sprinting = wantSprint && !me.exhausted && me.stamina > 0;
-    if (sprinting) {
-      me.stamina = Math.max(0, me.stamina - PLAYER.staminaDrain * dt);
-      me.regenWait = 0.5;
-      if (me.stamina <= 0) me.exhausted = true;
-    } else {
-      me.regenWait -= dt;
-      if (me.regenWait <= 0) me.stamina = Math.min(PLAYER.staminaMax, me.stamina + PLAYER.staminaRegen * dt);
-      if (me.exhausted && me.stamina >= PLAYER.staminaMin) me.exhausted = false;
+    // 웅크리기: C를 누르고 있는 동안 / 슬라이딩: 달리는 중에 C를 누르는 순간
+    if (crouchPress) {
+      crouchPress = false;
+      if (wantSprint && me.onGround && !me.slide && !me.dash && nowMs >= me.slideCd) {
+        const flen = Math.hypot(f, s);
+        const fxx = -Math.sin(me.yaw), fzz = -Math.cos(me.yaw), rxx = Math.cos(me.yaw), rzz = -Math.sin(me.yaw);
+        me.slide = { t: 0, dur: 0.85, dx: (fxx * f + rxx * s) / flen, dz: (fzz * f + rzz * s) / flen, v0: c.speed * PLAYER.sprintMult * 1.45, fx: 0 };
+        me.fovK = Math.max(me.fovK, 10);
+        slideSnd(0.25);
+      }
     }
+    if (me.slide && (stunned || me.dash)) endSlide(nowMs);
+    me.crouching = !!keys.KeyC && !me.slide && !stunned && locked();
+    const sprinting = wantSprint && !me.crouching && !me.slide;
     me.sprinting = sprinting;
 
     let vx = 0, vz = 0;
@@ -2230,11 +2248,22 @@ function update(dt, nowMs) {
       vx = me.dash.dx * me.dash.speed;
       vz = me.dash.dz * me.dash.speed;
       if (me.dash.t >= me.dash.dur) me.dash = null;
+    } else if (me.slide) {
+      const sl = me.slide;
+      sl.t += dt;
+      const k = Math.min(1, sl.t / sl.dur);
+      const v = c.speed * 0.5 + (sl.v0 - c.speed * 0.5) * Math.pow(1 - k, 1.6); // 처음엔 빠르게, 점점 느려짐
+      vx = sl.dx * v;
+      vz = sl.dz * v;
+      sl.fx -= dt;
+      if (sl.fx <= 0) { sl.fx = 0.07; burst(me.x, me.y + 0.1, me.z, 0xd8ccb0, 2); }
+      if (k >= 1) endSlide(nowMs);
     } else if (!stunned && (f || s)) {
       const len = Math.hypot(f, s);
       const sp = c.speed
         * (sprinting ? PLAYER.sprintMult : 1)
         * (me.blocking ? 0.55 : 1)
+        * (me.crouching ? 0.5 : 1)
         * (me.act && me.act.kind === 'swing' ? 0.8 : 1)
         * (buffed ? me.buffSpeed : 1);
       const fx = -Math.sin(me.yaw), fz = -Math.cos(me.yaw);
@@ -2246,7 +2275,7 @@ function update(dt, nowMs) {
     me.z += vz * dt;
     speedH = Math.hypot(vx, vz);
 
-    if (keys.Space && me.onGround && !stunned && locked()) { me.vy = PLAYER.jump; me.onGround = false; }
+    if (keys.Space && me.onGround && !stunned && locked()) { if (me.slide) endSlide(nowMs); me.vy = PLAYER.jump; me.onGround = false; }
     me.vy -= PLAYER.gravity * dt;
     me.y += me.vy * dt;
     if (me.y <= 0) { me.y = 0; me.vy = 0; me.onGround = true; }
@@ -2256,11 +2285,13 @@ function update(dt, nowMs) {
     sendTimer += dt;
     if (sendTimer >= 0.05) {
       sendTimer = 0;
-      send({ t: 'state', x: me.x, y: me.y, z: me.z, yaw: me.yaw, pitch: me.pitch, b: me.blocking });
+      send({ t: 'state', x: me.x, y: me.y, z: me.z, yaw: me.yaw, pitch: me.pitch, b: me.blocking, c: me.slide ? 2 : me.crouching ? 1 : 0 });
     }
   } else {
     me.sprinting = false;
     me.blocking = false;
+    me.slide = null;
+    me.crouching = false;
   }
 
   // 걷기 흔들림 / 발소리
@@ -2274,16 +2305,18 @@ function update(dt, nowMs) {
   me.shake = lerp(me.shake, 0, Math.min(1, dt * 7));
   me.roll = lerp(me.roll, 0, Math.min(1, dt * 6));
   me.fovK = lerp(me.fovK, 0, Math.min(1, dt * 6));
+  me.eyeH = lerp(me.eyeH, me.slide ? 0.75 : me.crouching ? 1.15 : PLAYER.eye, Math.min(1, dt * 14)); // 눈높이: 서기 / 웅크리기 / 슬라이딩
+  me.slideTilt = lerp(me.slideTilt, me.slide ? 0.07 : 0, Math.min(1, dt * 10));
   const dead = joined && !me.alive;
   if (!me.debugCam) {
     const bob = S.bob ? Math.abs(Math.cos(me.bobPhase)) * 0.035 * me.mv : 0;
     const sh = me.shake * 0.02;
-    camera.position.set(me.x + rand(-sh, sh), me.y + (dead ? 0.35 : PLAYER.eye + bob), me.z + rand(-sh, sh));
+    camera.position.set(me.x + rand(-sh, sh), me.y + (dead ? 0.35 : me.eyeH + bob), me.z + rand(-sh, sh));
     const wob = stunned ? Math.sin(nowMs * 0.012) * 0.04 : 0;
     camera.rotation.set(
       dead ? -0.2 : me.pitch - me.kick,
       me.yaw + wob,
-      dead ? 0.5 : me.roll + (S.bob ? Math.sin(me.bobPhase) * 0.004 * me.mv : 0),
+      dead ? 0.5 : me.roll + me.slideTilt + (S.bob ? Math.sin(me.bobPhase) * 0.004 * me.mv : 0),
     );
   }
   const targetFov = S.fov + (me.sprinting ? 8 : 0) + me.fovK + (nowMs < me.buffUntil ? 3 : 0);
@@ -2306,6 +2339,7 @@ function update(dt, nowMs) {
     r.root.rotation.y = r.yaw;
     const rs = nowMs < r.stunUntil;
     animateRig(r, dt, {
+      stance: r.stance || 0,
       v: r.v, air: pos.y > 0.08, sprint: r.v > CLASSES[r.cls].speed * 1.25,
       blocking: r.blocking && r.alive && !rs, pitch: r.pitch,
       onStep: () => stepSnd(volFor(r.id, 0.08)),
