@@ -25,7 +25,7 @@ const DEFAULT_MODE = process.env.MODE === 'tdm' ? 'tdm' : 'ffa';
 const MOVE_CHECK = process.env.NO_MOVE_CHECK !== '1';
 const REQUIRE_LOGIN = process.env.REQUIRE_LOGIN === '1';
 const TICK_MS = 50;
-const MOVE_SLACK = 2.6;
+const MOVE_SLACK = 3.2; // 달리기 x 버프 x 슬라이딩 + 네트워크 오차 여유
 const EMOTE_IDS = new Set(EMOTES.map((e) => e.id));
 const MODES = ['ffa', 'tdm'];
 
@@ -407,7 +407,8 @@ Room.prototype.stepProjs = function stepProjs(h) {
         const t = L2 > 0 ? clamp(((q.x - ox) * sx + (q.z - oz) * sz) / L2, 0, 1) : 0;
         if (Math.hypot(ox + sx * t - q.x, oz + sz * t - q.z) > PLAYER.radius + 0.3) continue;
         const yy = oy + (s.y - oy) * t;
-        if (yy < q.y - 0.1 || yy > q.y + 1.95) continue;
+        const hh = q.stance === 2 ? 0.95 : q.stance === 1 ? 1.45 : 1.95; // 웅크리면 화살이 머리 위로 지나감
+        if (yy < q.y - 0.1 || yy > q.y + hh) continue;
         const dx = q.x - s.owner.x, dz = q.z - s.owner.z;
         end = 'hit';
         applyHit(s.owner, q, s.o, dx, dz, Math.hypot(dx, dz));
@@ -433,7 +434,7 @@ function respawn(rm, id, force = false) {
   Object.assign(q, {
     x: s.x, y: s.y, z: s.z, yaw: s.yaw, pitch: 0, hp: CLASSES[q.cls].hp,
     alive: true, blocking: false, blockSince: 0, stunUntil: 0, buffUntil: 0, buffDmg: 1, buffSpeed: 1,
-    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(),
+    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), stance: 0,
   });
   q.lastState = now();
   if (changed) rm.broadcast({ t: 'roster', list: rm.roster() });
@@ -585,6 +586,7 @@ wss.on('connection', (ws) => {
       const wantBlock = !!m.b && !isStunned(p);
       if (wantBlock && !p.blocking) p.blockSince = t;
       p.blocking = wantBlock;
+      p.stance = m.c === 1 || m.c === 2 ? m.c : 0; // 0 서기 / 1 웅크리기 / 2 슬라이딩
     } else if (m.t === 'attack') {
       if (!p.alive || isStunned(p) || rm.over) return;
       const c = CLASSES[p.cls];
@@ -658,7 +660,7 @@ setInterval(() => { // 20Hz 스냅샷
       t: 'snap',
       p: [...rm.players.values()].map((p) => ({
         id: p.id, x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3),
-        yaw: +p.yaw.toFixed(3), pitch: +p.pitch.toFixed(3), b: p.blocking, hp: p.hp, alive: p.alive,
+        yaw: +p.yaw.toFixed(3), pitch: +p.pitch.toFixed(3), b: p.blocking, c: p.stance || 0, hp: p.hp, alive: p.alive,
       })),
     });
   }

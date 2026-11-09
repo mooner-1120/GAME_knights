@@ -84,10 +84,6 @@ export const PLAYER = {
   respawnMs: 3000,
   maxNameLen: 16,
   sprintMult: 1.55,
-  staminaMax: 100,
-  staminaDrain: 24,
-  staminaRegen: 18,
-  staminaMin: 20,
   classSwapGraceMs: 8000,
   // 패링/반격: 방어를 누른 직후 parryMs 안에 맞으면 피해 0 + 공격자 기절 → counterWindowMs 동안 반격 강화
   parryMs: 300,
