@@ -296,7 +296,7 @@ export const ACH = [
 ];
 
 // 꾸미기 아이템 (슬롯: cape 망토 / hat 모자). 뽑기로만 얻음
-export const RARITY = { common: { w: 60, refund: 20 }, rare: { w: 28, refund: 40 }, epic: { w: 10, refund: 100 }, legendary: { w: 2, refund: 300 } };
+export const RARITY = { common: { w: 60, refund: 20 }, uncommon: { w: 0, refund: 30 }, rare: { w: 28, refund: 40 }, epic: { w: 10, refund: 100 }, legendary: { w: 2, refund: 300 } };
 export const ITEMS = [
   { id: 'cape_red', slot: 'cape', rar: 'common', color: 0xa02828 },
   { id: 'cape_blue', slot: 'cape', rar: 'common', color: 0x2a56a8 },
@@ -315,12 +315,40 @@ export const ITEMS = [
   { id: 'hat_halo', slot: 'hat', rar: 'epic', kind: 'halo', color: 0xfff2a0, glow: 0xffe060 },
   { id: 'hat_dragon', slot: 'hat', rar: 'legendary', kind: 'dragon', color: 0xff5a1a, glow: 0xff3a00 },
 ];
+// ── 캐릭터 스킨: 직업 20종 × 테마 16종(등급 5단계). 직업 고유 도색의 일부를 테마 색으로 바꿉니다.
+export const SKIN_THEMES = {
+  crimson:  { rar: 'common',    cloth: '#a82a2a', cloth2: '#701818' },
+  forest:   { rar: 'common',    cloth: '#3f7a3a', cloth2: '#285426' },
+  navy:     { rar: 'common',    cloth: '#2a3f7a', cloth2: '#1a284f' },
+  ash:      { rar: 'common',    cloth: '#7a7a80', cloth2: '#4f4f55' },
+  sand:     { rar: 'uncommon',  cloth: '#c9a96a', cloth2: '#9a7e46', trim: '#6b4a22' },
+  violet:   { rar: 'uncommon',  cloth: '#7a4aa8', cloth2: '#52307a', trim: '#e8d27a' },
+  teal:     { rar: 'uncommon',  cloth: '#2a9a96', cloth2: '#1a6a68', trim: '#f0e6b0' },
+  rust:     { rar: 'uncommon',  cloth: '#a85a2a', cloth2: '#6f3a18', trim: '#d8c070', metal: '#8a6a4a', metal2: '#5a4430' },
+  snow:     { rar: 'rare',      cloth: '#e8eef5', cloth2: '#b8c8da', trim: '#4a78b8', metal: '#dfe8f2', metal2: '#a8b8cc' },
+  ember:    { rar: 'rare',      cloth: '#3a1a14', cloth2: '#240e0a', trim: '#ff7a2a', metal: '#6a4a40', metal2: '#3a2822' },
+  midnight: { rar: 'rare',      cloth: '#1a2048', cloth2: '#0e1230', trim: '#8ab4ff', metal: '#8a94b8', metal2: '#4f5878' },
+  gold:     { rar: 'epic',      cloth: '#e2b83a', cloth2: '#a8801a', trim: '#fff2b0', metal: '#f0d070', metal2: '#b08a28', glow: 0x6a4a00 },
+  obsidian: { rar: 'epic',      cloth: '#16161c', cloth2: '#0a0a0e', trim: '#b04aff', metal: '#34343f', metal2: '#1c1c24', glow: 0x40106a },
+  frost:    { rar: 'epic',      cloth: '#4ab8e8', cloth2: '#2a7aa8', trim: '#e8faff', metal: '#bfe8f8', metal2: '#7ab8d8', glow: 0x0a4a6a },
+  inferno:  { rar: 'legendary', cloth: '#d02a10', cloth2: '#7a0e04', trim: '#ffd84a', metal: '#ff7a2a', metal2: '#b03a10', pants: '#2a0a06', glow: 0x8a2a00 },
+  celestial:{ rar: 'legendary', cloth: '#f6f0ff', cloth2: '#c9b8f0', trim: '#ffe680', metal: '#fff7d0', metal2: '#d8c890', pants: '#8a7ac8', glow: 0x6a5a9a },
+};
+for (const cid of Object.keys(CLASSES)) {
+  for (const [th, d] of Object.entries(SKIN_THEMES)) {
+    ITEMS.push({ id: `skin_${cid}_${th}`, slot: 'skin', cls: cid, theme: th, rar: d.rar, color: parseInt(d.cloth.slice(1), 16), glow: d.glow });
+  }
+}
+export const SKIN_W = { common: 50, uncommon: 28, rare: 13, epic: 7, legendary: 2 };
 export const ITEM_BY_ID = Object.fromEntries(ITEMS.map((i) => [i.id, i]));
 // 뽑기: 코인으로만 (현금 결제 없음). pityAt번째 뽑기까지 에픽 이상이 안 나오면 확정
-export const GACHA = { cost1: 100, cost10: 900, pityAt: 30 };
-export function gachaOdds() {
-  const tot = Object.values(RARITY).reduce((a, r) => a + r.w, 0);
-  return Object.fromEntries(Object.entries(RARITY).map(([k, r]) => [k, +((r.w / tot) * 100).toFixed(1)]));
+export const GACHA = { cost1: 100, cost10: 900, skin1: 150, skin10: 1350, pityAt: 30 };
+export function gachaWeights(pool) {
+  return pool === 'skin' ? SKIN_W : Object.fromEntries(Object.entries(RARITY).filter(([, r]) => r.w > 0).map(([k, r]) => [k, r.w]));
+}
+export function gachaOdds(pool = 'gear') {
+  const w = gachaWeights(pool), tot = Object.values(w).reduce((a, b) => a + b, 0);
+  return Object.fromEntries(Object.entries(w).map(([k, v]) => [k, +((v / tot) * 100).toFixed(1)]));
 }
 
 /* ═════════ 게임 모드 / 맵 목표물 (서버·클라이언트 공용) ═════════

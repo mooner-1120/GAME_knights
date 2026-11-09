@@ -15,7 +15,7 @@ import { WebSocketServer } from 'ws';
 import {
   CLASSES, SKILLS, MAPS, PLAYER, MATCH, ROOM, CHAT, EMOTES, EMOTE_GAP_MS,
   PROJ, resolveCollision, lineBlocked, projBlocked,
-  levelFor, xpForLevel, REWARD, ACH, ITEMS, ITEM_BY_ID, RARITY, GACHA,
+  levelFor, xpForLevel, REWARD, ACH, ITEMS, ITEM_BY_ID, RARITY, GACHA, gachaWeights,
   MODE_LIST, isTeamMode, MODE_RULES, ITEM_KINDS, ITEM_RESPAWN_MS, ITEM_PICKUP_R,
 } from './classes.js';
 import { dbEnabled, verifyUser, recordMatch, loadProgress, saveProgress } from './db.js';
@@ -792,12 +792,22 @@ function flushProg(userId) {
   const next = prev.then(() => saveProgress(userId, snap, dirty)).catch(() => {}).finally(() => { if (saveChain.get(userId) === next) saveChain.delete(userId); });
   saveChain.set(userId, next);
 }
-const eqOf = (p) => (p.bot ? p.eq || {} : p.prog?.equipped || {});
+const eqOf = (p) => {
+  if (p.bot) { const { skinTheme, ...e } = p.eq || {}; if (skinTheme) e.skin = `skin_${p.cls}_${skinTheme}`; return e; }
+  const e = p.prog?.equipped;
+  if (!e) return {};
+  const o = {};
+  if (e.cape) o.cape = e.cape;
+  if (e.hat) o.hat = e.hat;
+  if (e.skins?.[p.cls]) o.skin = e.skins[p.cls];
+  return o;
+};
 function randomBotEq() {
   const pick = (slot) => { const l = ITEMS.filter((i) => i.slot === slot && (i.rar === 'common' || i.rar === 'rare')); return l[Math.floor(Math.random() * l.length)].id; };
   const eq = {};
   if (Math.random() < 0.6) eq.cape = pick('cape');
   if (Math.random() < 0.5) eq.hat = pick('hat');
+  if (Math.random() < 0.5) eq.skinTheme = ['crimson', 'forest', 'navy', 'ash', 'sand', 'violet', 'teal', 'rust', 'snow', 'ember', 'midnight'][Math.floor(Math.random() * 11)];
   return eq;
 }
 const classesWithKills = (g) => Object.values(g.stats).filter((x) => x.kills > 0).length;
@@ -869,40 +879,53 @@ function awardMatch(rm, winnerPlayer, winnerTeam, draw) {
 }
 
 // 뽑기: 코인으로만 (결제 없음). 확률은 RARITY 가중치, 30번째까지 에픽 이상이 없으면 확정
-function pickRarity(list) {
-  const tot = list.reduce((a, k) => a + RARITY[k].w, 0);
+function pickRarity(list, W) {
+  const ks = list.filter((k) => W[k] > 0);
+  const tot = ks.reduce((a, k) => a + W[k], 0);
   let r = crypto.randomInt(0, tot);
-  for (const k of list) { if (r < RARITY[k].w) return k; r -= RARITY[k].w; }
-  return list[0];
+  for (const k of ks) { if (r < W[k]) return k; r -= W[k]; }
+  return ks[0];
 }
-function rollGacha(g) {
-  g.counters.pity = (g.counters.pity || 0) + 1;
-  const rar = g.counters.pity >= GACHA.pityAt ? pickRarity(['epic', 'legendary']) : pickRarity(Object.keys(RARITY));
-  if (rar === 'epic' || rar === 'legendary') g.counters.pity = 0;
-  const pool = ITEMS.filter((i) => i.rar === rar);
-  const item = pool[crypto.randomInt(0, pool.length)];
+function rollGacha(g, pool, cls) {
+  const W = gachaWeights(pool), pk = pool === 'skin' ? 'pity_skin' : 'pity';
+  g.counters[pk] = (g.counters[pk] || 0) + 1;
+  const rar = g.counters[pk] >= GACHA.pityAt ? pickRarity(['epic', 'legendary'], W) : pickRarity(Object.keys(W), W);
+  if (rar === 'epic' || rar === 'legendary') g.counters[pk] = 0;
+  const cand = ITEMS.filter((i) => i.rar === rar && (pool === 'skin' ? i.slot === 'skin' && i.cls === cls : i.slot === 'cape' || i.slot === 'hat'));
+  const item = cand[crypto.randomInt(0, cand.length)];
   const dup = g.owned.includes(item.id);
   const refund = dup ? RARITY[item.rar].refund : 0;
   if (dup) g.coins += refund; else g.owned.push(item.id);
   return { id: item.id, rar: item.rar, dup, refund };
 }
-function handleGacha(ws, n) {
+function handleGacha(ws, n, pool, cls) {
   const g = ws.prog;
   if (!g) return send(ws, { t: 'gachaerr', code: 'login' });
   n = n === 10 ? 10 : 1;
-  const cost = n === 10 ? GACHA.cost10 : GACHA.cost1;
+  pool = pool === 'skin' ? 'skin' : 'gear';
+  if (pool === 'skin' && !CLASSES[cls]) return;
+  const cost = pool === 'skin' ? (n === 10 ? GACHA.skin10 : GACHA.skin1) : (n === 10 ? GACHA.cost10 : GACHA.cost1);
   if (g.coins < cost) return send(ws, { t: 'gachaerr', code: 'coins' });
   g.coins -= cost;
   const results = [];
-  for (let i = 0; i < n; i++) results.push(rollGacha(g));
+  for (let i = 0; i < n; i++) results.push(rollGacha(g, pool, cls));
   flushProg(ws.progUser);
-  send(ws, { t: 'gacharesult', items: results, coins: g.coins, pity: g.counters.pity || 0 });
+  send(ws, { t: 'gacharesult', items: results, coins: g.coins, pity: g.counters[pool === 'skin' ? 'pity_skin' : 'pity'] || 0, pool });
   send(ws, profileOf(g));
 }
 function handleEquip(ws, m) {
   const g = ws.prog;
-  if (!g || (m.slot !== 'cape' && m.slot !== 'hat')) return;
-  if (m.id == null) delete g.equipped[m.slot];
+  if (!g || (m.slot !== 'cape' && m.slot !== 'hat' && m.slot !== 'skin')) return;
+  if (m.slot === 'skin') {
+    if (!CLASSES[m.cls]) return;
+    g.equipped.skins = g.equipped.skins && typeof g.equipped.skins === 'object' ? g.equipped.skins : {};
+    if (m.id == null) delete g.equipped.skins[m.cls];
+    else {
+      const it = ITEM_BY_ID[m.id];
+      if (!it || it.slot !== 'skin' || it.cls !== m.cls || !g.owned.includes(it.id)) return;
+      g.equipped.skins[m.cls] = it.id;
+    }
+  } else if (m.id == null) delete g.equipped[m.slot];
   else {
     const it = ITEM_BY_ID[m.id];
     if (!it || it.slot !== m.slot || !g.owned.includes(it.id)) return;
@@ -1220,7 +1243,7 @@ wss.on('connection', (ws) => {
       const prog = await acquireProg(ws, user.id);
       return send(ws, prog ? profileOf(prog) : { t: 'profile', guest: true, off: true });
     }
-    if (m.t === 'gacha') return handleGacha(ws, Number(m.n));
+    if (m.t === 'gacha') return handleGacha(ws, Number(m.n), m.pool, String(m.cls || ''));
     if (m.t === 'equip') return handleEquip(ws, m);
     if (m.t === 'settitle') return handleTitle(ws, m.id == null ? null : String(m.id));
 
