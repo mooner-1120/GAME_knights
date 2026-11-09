@@ -2,7 +2,7 @@
 // 구성: 설정 → 렌더러/월드 → 블록형 기사 모델·애니메이션 → 1인칭 → 사운드 → 네트워크 → 메뉴/HUD → 입력 → 메인 루프
 
 import * as THREE from 'three';
-import { CLASSES, SKILLS, ARENA, PLAYER, TEAMS, EMOTES, MAPS, PROJ, resolveCollision, lineBlocked, projBlocked, useMap, ACH, ITEMS, ITEM_BY_ID, RARITY, GACHA, gachaOdds, MODE_LIST, isTeamMode, MODE_RULES, ITEM_KINDS } from '/classes.js';
+import { CLASSES, SKILLS, ARENA, PLAYER, TEAMS, EMOTES, MAPS, PROJ, resolveCollision, lineBlocked, projBlocked, useMap, ACH, ITEMS, ITEM_BY_ID, RARITY, GACHA, gachaOdds, SKIN_THEMES, MODE_LIST, isTeamMode, MODE_RULES, ITEM_KINDS } from '/classes.js';
 import { t, cname, cdesc, crole, sname, sdesc, setLang, getLang, onLang, applyI18n, LANGS } from './i18n.js';
 
 const $ = (id) => document.getElementById(id);
@@ -375,7 +375,17 @@ const LOOKS = {
 const weaponOf = (id) => getLook(id).weapon || 'sword';
 const isBowCls = (id) => { const w = weaponOf(id); return w === 'bow' || w === 'crossbow'; };
 const hexStr = (n) => '#' + n.toString(16).padStart(6, '0');
-function getLook(id) {
+const skinLookCache = {};
+function getLook(id, skin) {
+  const sk = skin && ITEM_BY_ID[skin];
+  if (sk && sk.slot === 'skin' && sk.cls === id) {
+    return (skinLookCache[skin] ??= (() => {
+      const base = getLook(id), th = SKIN_THEMES[sk.theme], o = { ...base };
+      for (const k of ['cloth', 'cloth2', 'trim', 'metal', 'metal2', 'pants']) if (th[k]) o[k] = th[k];
+      if (th.cloth && base.plume) o.plume = th.trim || th.cloth;
+      return o;
+    })());
+  }
   return LOOKS[id] || { ...LOOKS.knight, cloth: hexStr(CLASSES[id]?.color ?? 0x4a6fa5), cloth2: shade(hexStr(CLASSES[id]?.color ?? 0x4a6fa5), -0.3) };
 }
 
@@ -451,9 +461,11 @@ function paintLeg(g, L) {
 }
 
 const matCache = {};
-function getMats(id) {
-  if (matCache[id]) return matCache[id];
-  const L = getLook(id);
+function getMats(id, skin) {
+  const sk = skin && ITEM_BY_ID[skin]?.cls === id ? skin : null;
+  const key = sk ? id + '|' + sk : id;
+  if (matCache[key]) return matCache[key];
+  const L = getLook(id, sk);
   const mh = (f) => texMat(pixTex(8, 8, (g) => paintHead(g, f, L)));
   const head = [mh('side'), mh('side'), mh('top'), mh('bottom'), mh('back'), mh('front')];
   const mt = (f, w) => texMat(pixTex(w, 12, (g) => paintTorso(g, f, L, w)));
@@ -462,7 +474,9 @@ function getMats(id) {
   const arm = texMat(pixTex(4, 12, (g) => paintArm(g, L)));
   const leg = texMat(pixTex(4, 12, (g) => paintLeg(g, L)));
   const pauld = texMat(pixTex(4, 4, (g) => { noise(g, 0, 0, 4, 4, L.armMetal ? L.metal : L.cloth2, 0.1); px(g, 0, 3, L.trim, 4, 1); }));
-  return (matCache[id] = { head, torso, arm, leg, pauld });
+  const glow = sk ? SKIN_THEMES[ITEM_BY_ID[sk].theme].glow : 0;
+  if (glow) for (const m of [...head, ...torso, arm, leg, pauld]) { m.emissive?.setHex(glow); }
+  return (matCache[key] = { head, torso, arm, leg, pauld });
 }
 
 function makeSword(len, wide = 1, trim = '#c79a3a') {
@@ -570,7 +584,7 @@ function nameSprite(text, color) {
 //   root ─ legR, legL (엉덩이 관절)
 //        └ upper(허리 관절) ─ torso, head(목 관절), armR, armL(어깨 관절), shield
 function makeRig(clsId, name, team = 0, eq = null) {
-  const c = CLASSES[clsId], L = getLook(clsId), M = getMats(clsId);
+  const c = CLASSES[clsId], L = getLook(clsId, eq?.skin), M = getMats(clsId, eq?.skin);
   const root = new THREE.Group();
   root.rotation.order = 'YXZ';
   const add = (geo, mat, x, y, z, parent) => {
@@ -964,7 +978,8 @@ let fp = null;
 const FP_PIVOT = { x: 0.34, y: -0.25, z: -0.24 }; // 1인칭 오른쪽 어깨 위치
 function buildViewmodel() {
   vm.clear();
-  const c = CLASSES[me.cls], L = getLook(me.cls), M = getMats(me.cls);
+  const mySkin = prof && !prof.guest ? prof.equipped?.skins?.[me.cls] : null;
+  const c = CLASSES[me.cls], L = getLook(me.cls, mySkin), M = getMats(me.cls, mySkin);
   const arm = new THREE.Group();
   arm.rotation.order = 'YXZ';
   arm.position.set(FP_PIVOT.x, FP_PIVOT.y, FP_PIVOT.z);
@@ -1799,9 +1814,9 @@ for (const [key, id] of [['minimap', 'set-minimap'], ['netinfo', 'set-netinfo'],
 /* ═════════════ 성장: 프로필 / 업적 / 상점 / 꾸미기 ═════════════ */
 let prof = null;            // 서버가 보내 준 내 진행도 ({guest:true} 이면 게스트)
 let lobbyWs = null, lobbyTok = null;
-const RAR_COLOR = { common: '#b8c4d6', rare: '#5aa8ff', epic: '#c06aff', legendary: '#ffb02e' };
+const RAR_COLOR = { common: '#b8c4d6', uncommon: '#6fd38a', rare: '#5aa8ff', epic: '#c06aff', legendary: '#ffb02e' };
 const hex6 = (n) => '#' + n.toString(16).padStart(6, '0');
-const itemName = (id) => t('item_' + id);
+const itemName = (id) => { const d = ITEM_BY_ID[id]; return d?.slot === 'skin' ? `${t('sk_' + d.theme)} ${cname(CLASSES[d.cls])}` : t('item_' + id); };
 // 로비에서는 로비 연결로, 게임 중에는 게임 연결로 보냄
 function profSend(o) {
   const w = joined ? ws : lobbyWs;
@@ -1847,6 +1862,18 @@ function chipRow(slot) {
   return `<div style="margin:6px 0 2px;color:#9fb0c8;font-size:12px">${esc(t('slot_' + slot))}</div><div class="chips">${none}${list.map((i) =>
     `<span class="chip${cur === i.id ? ' on' : ''}" data-slot="${slot}" data-id="${i.id}" style="border-color:${RAR_COLOR[i.rar]}"><i style="background:${hex6(i.color)}"></i>${esc(itemName(i.id))}</span>`).join('')}</div>`;
 }
+function renderSkins() {
+  const ssel = $('pf-skincls'), box = $('pf-skins');
+  if (!ssel || !box || !prof || prof.guest) return;
+  const cid = ssel.value || ssel.options[0]?.value;
+  const cur = prof.equipped?.skins?.[cid] || null;
+  const own = ITEMS.filter((i) => i.slot === 'skin' && i.cls === cid && prof.owned.includes(i.id));
+  box.innerHTML = `<div class="chips"><span class="chip${cur ? '' : ' on'}" data-id="">${esc(t('pf_skin_default'))}</span>${own.map((i) =>
+    `<span class="chip${cur === i.id ? ' on' : ''}" data-id="${i.id}" style="border-color:${RAR_COLOR[i.rar]}"><i style="background:${hex6(i.color)}"></i>${esc(itemName(i.id))}</span>`).join('')}</div>`
+    + `<p class="note">${esc(t('pf_skin_count', { a: own.length, b: Object.keys(SKIN_THEMES).length }))}</p>`;
+  box.querySelectorAll('.chip').forEach((c) => { c.onclick = () => { profSend({ t: 'equip', slot: 'skin', cls: cid, id: c.dataset.id || null }); }; });
+  if (pv && pv.rig?.cls === cid) setPreviewClass(cid);
+}
 function renderProfile() {
   const g = $('pf-guest'), main = $('pf-main');
   if (!g || !main) return;
@@ -1870,6 +1897,10 @@ function renderProfile() {
   const inv = $('pf-inv');
   inv.innerHTML = prof.owned.length ? chipRow('cape') + chipRow('hat') : `<p class="note">${esc(t('pf_inv_empty'))}</p>`;
   inv.querySelectorAll('.chip').forEach((c) => { c.onclick = () => profSend({ t: 'equip', slot: c.dataset.slot, id: c.dataset.id || null }); });
+  const ssel = $('pf-skincls');
+  if (!ssel.options.length) ssel.innerHTML = Object.values(CLASSES).map((c) => `<option value="${c.id}">${esc(cname(c))}</option>`).join('');
+  ssel.onchange = renderSkins;
+  renderSkins();
   $('pf-ach').innerHTML = ACH.map((a) => {
     const v = prof.counters[a.c] || 0, done = !!prof.ach[a.id];
     return `<div class="ach${done ? ' done' : ''}"><div class="nm"><b>${esc(t('ach_' + a.id))}</b>${done ? ' ✔' : ''}<small>${esc(t('achc_' + a.c, { n: a.goal }))} · +${a.coins} 🪙</small></div><div class="pg"><i style="width:${Math.min(100, (v / a.goal) * 100)}%"></i></div><small style="min-width:54px;text-align:right">${Math.min(v, a.goal)}/${a.goal}</small></div>`;
@@ -1882,16 +1913,22 @@ function renderShop() {
   if (!$('sh-coins')) return;
   const logged = prof && !prof.guest;
   $('sh-coins').textContent = logged ? `${prof.coins} 🪙` : '-';
-  const odds = gachaOdds();
-  $('sh-odds').textContent = `${t('shop_odds')}: ` + Object.keys(RARITY).map((k) => `${t('rar_' + k)} ${odds[k]}%`).join(' · ');
-  $('sh-pull1').textContent = t('shop_pull1', { c: GACHA.cost1 });
-  $('sh-pull10').textContent = t('shop_pull10', { c: GACHA.cost10 });
+  const pool = $('sh-pool').value === 'skin' ? 'skin' : 'gear';
+  $('sh-cls').style.display = pool === 'skin' ? '' : 'none';
+  if (!$('sh-cls').options.length) $('sh-cls').innerHTML = Object.values(CLASSES).map((c) => `<option value="${c.id}">${esc(cname(c))}</option>`).join('');
+  const odds = gachaOdds(pool);
+  $('sh-odds').textContent = `${t('shop_odds')}: ` + Object.keys(odds).map((k) => `${t('rar_' + k)} ${odds[k]}%`).join(' · ');
+  const c1 = pool === 'skin' ? GACHA.skin1 : GACHA.cost1, c10 = pool === 'skin' ? GACHA.skin10 : GACHA.cost10;
+  $('sh-pull1').textContent = t('shop_pull1', { c: c1 });
+  $('sh-pull10').textContent = t('shop_pull10', { c: c10 });
   $('sh-pull1').disabled = $('sh-pull10').disabled = !logged;
-  const pity = logged ? prof.counters.pity || 0 : 0;
+  const pity = logged ? prof.counters[pool === 'skin' ? 'pity_skin' : 'pity'] || 0 : 0;
   $('sh-pity').textContent = logged ? t('shop_pity', { n: Math.max(1, GACHA.pityAt - pity) }) : t('shop_err_login');
 }
-$('sh-pull1').onclick = () => { $('sh-err').textContent = ''; profSend({ t: 'gacha', n: 1 }); };
-$('sh-pull10').onclick = () => { $('sh-err').textContent = ''; profSend({ t: 'gacha', n: 10 }); };
+const pullMsg = (n) => ({ t: 'gacha', n, pool: $('sh-pool').value === 'skin' ? 'skin' : 'gear', cls: $('sh-cls').value });
+$('sh-pull1').onclick = () => { $('sh-err').textContent = ''; profSend(pullMsg(1)); };
+$('sh-pull10').onclick = () => { $('sh-err').textContent = ''; profSend(pullMsg(10)); };
+$('sh-pool').onchange = renderShop;
 function showGachaResult(m) {
   $('sh-result').innerHTML = m.items.map((it) => {
     const def = ITEM_BY_ID[it.id];
@@ -2025,7 +2062,7 @@ const SKFX = {
   palm: [0xffffff, 3], impale: [0xdfe5ec, 3], ambush: [0x555577, 3], shadowstep: [0x6a4aa0, 3], iaido: [0xffb0c0, 4.5],
   fireball: [0xff8a2a, 2], volley: [0xc8e08a, 3], snare: [0x7fbf7f, 2.5], drain: [0x9a4ac0, 3], hex: [0xe04a8a, 3], overcharge: [0xffe27a, 2],
 };
-const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+function esc(s) { return String(s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch])); }
 
 (function injectUi() {
   const st = document.createElement('style');
@@ -2359,7 +2396,7 @@ function initPreview() {
 function setPreviewClass(id) {
   if (!pv) return;
   if (pv.rig) pv.sc.remove(pv.rig.root);
-  const rig = makeRig(id, '', 0, prof && !prof.guest ? prof.equipped : null);
+  const rig = makeRig(id, '', 0, prof && !prof.guest ? { ...prof.equipped, skin: prof.equipped?.skins?.[id] } : null);
   scene.remove(rig.root); // makeRig 는 게임 장면에 넣어 버리므로 미리보기 장면으로 옮김
   rig.label.visible = false;
   rig.cls = id;
