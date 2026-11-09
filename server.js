@@ -154,7 +154,7 @@ class Room {
     return {
       t: 'match', mode: this.mode, map: this.mapId, limit: this.limit, teamScore: this.teamScore, over: this.over,
       hostId: this.custom ? this.hostId : null, custom: this.custom, room: this.name,
-      bots: this.botCount, botTarget: this.botTarget, botDiff: this.botDiff, practice: this.practice,
+      roomId: this.id, bots: this.botCount, botTarget: this.botTarget, botDiff: this.botDiff, practice: this.practice,
       remainMs: this.over ? 0 : Math.max(0, this.endsAt - now()), durationMs: MATCH.durationMs,
     };
   }
@@ -307,13 +307,19 @@ function heal(q, amt) {
   if (q.hp > before) q.room.broadcast({ t: 'heal', id: q.id, amt: Math.round(q.hp - before), hp: q.hp });
 }
 
-function kill(p, q) {
+function kill(p, q, o) {
   const rm = p.room;
   q.alive = false; q.blocking = false; q.stunUntil = 0; q.buffUntil = 0;
   q.deaths++; p.kills++;
   if (q.bot && Math.random() < 0.5) q.nextCls = BOT_CLASSES[Math.floor(Math.random() * BOT_CLASSES.length)];
   if (rm.mode === 'tdm') rm.teamScore[p.team]++;
   rm.broadcast({ t: 'kill', killer: p.id, victim: q.id });
+  {
+    const lg = q.dmgLog || new Map(), me = lg.get(p.id) || { dmg: 0, hits: 0 };
+    const assists = [...lg.entries()].filter(([id, e]) => id !== p.id && e.dmg >= 10).sort((a, b) => b[1].dmg - a[1].dmg).slice(0, 3)
+      .map(([, e]) => ({ name: e.name, cls: e.cls, dmg: e.dmg }));
+    send(q.ws, { t: 'deathinfo', by: p.id, name: p.name, cls: p.cls, hp: Math.round(p.hp), maxhp: CLASSES[p.cls].hp, dmg: me.dmg, hits: me.hits, skill: o?.skill || null, tag: o?.counter ? 'counter' : null, assists });
+  }
   rm.broadcast({ t: 'roster', list: rm.roster() });
   rm.broadcast(rm.matchState());
   rm.later(() => respawn(rm, q.id), PLAYER.respawnMs);
@@ -365,6 +371,10 @@ function applyHit(p, q, o, dx, dz, dist) {
   const dmg = Math.max(1, Math.round(o.dmg * mult * (guarding ? 1 - qc.block : 1)));
 
   q.hp = Math.max(0, q.hp - dmg);
+  const lg = q.dmgLog || (q.dmgLog = new Map()); // 사망 요약용: 누가 얼마나 때렸는지
+  const le = lg.get(p.id) || { dmg: 0, hits: 0 };
+  le.dmg += dmg; le.hits++; le.name = p.name; le.cls = p.cls; le.skill = o.skill || null; le.t = t;
+  lg.set(p.id, le);
   rm.broadcast({ t: 'hit', id: q.id, by: p.id, dmg, hp: q.hp, blocked: guarding, skill: o.skill || null, tag });
   if (o.lifesteal) heal(p, dmg * o.lifesteal);
   if (o.selfHeal) heal(p, o.selfHeal);
@@ -376,7 +386,7 @@ function applyHit(p, q, o, dx, dz, dist) {
     }
     if (o.stun && !guarding) stun(q, o.stun);
   } else {
-    kill(p, q);
+    kill(p, q, o);
   }
 }
 
@@ -453,7 +463,7 @@ function respawn(rm, id, force = false) {
   Object.assign(q, {
     x: s.x, y: s.y, z: s.z, yaw: s.yaw, pitch: 0, hp: CLASSES[q.cls].hp,
     alive: true, blocking: false, blockSince: 0, stunUntil: 0, buffUntil: 0, buffDmg: 1, buffSpeed: 1,
-    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), stance: 0,
+    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), stance: 0, dmgLog: new Map(),
   });
   q.lastState = now();
   if (changed) rm.broadcast({ t: 'roster', list: rm.roster() });
@@ -551,7 +561,7 @@ function addBot(rm) {
     id, ws: BOT_WS, room: rm, name: 'Knight', cls, team: rm.assignTeam(), userId: null, bot: true, x: 0, y: 0, z: 0, yaw: 0, pitch: 0,
     hp: CLASSES[cls].hp, alive: true, blocking: false, blockSince: 0, kills: 0, deaths: 0, lastAttack: 0,
     lastState: now(), lastChat: 0, lastEmote: 0, stunUntil: 0, buffUntil: 0, buffDmg: 1, buffSpeed: 1,
-    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), nextCls: null, stance: 0,
+    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), nextCls: null, stance: 0, dmgLog: new Map(),
     ai: { target: null, retargetAt: 0, actAt: 0, skillAt: 0, strafe: 1, strafeAt: 0, errYaw: 0, errPitch: 0, errAt: 0, blockAt: 0, blockEnd: 0, seen: 0, dash: null, avoidUntil: 0, avoidDir: 1, lx: 0, lz: 0, lcheck: 0 },
   };
   Object.assign(p, rm.spawnFor(p));
@@ -570,8 +580,9 @@ function botSkill(rm, p, tg, d, los, aligned, L, t) {
   if (!def || t < (p.cds[id] || 0)) return false;
   const a = p.ai;
   let use = false;
-  if (def.heal) use = p.hp < c.hp * 0.6;
-  else if (def.dur) use = d < 14;
+  const allies = rm.mode === 'tdm' ? [...rm.players.values()].filter((q) => q !== p && q.alive && q.team === p.team && Math.hypot(q.x - p.x, q.z - p.z) <= (def.radius || 0)) : [];
+  if (def.heal) use = p.hp < c.hp * 0.55 || allies.some((q) => q.hp < CLASSES[q.cls].hp * 0.6); // 팀전에선 다친 아군도 치유
+  else if (def.dur) use = d < 16 && (allies.length > 0 || !def.radius || rm.mode !== 'tdm');       // 버프는 아군이 가까이 있을 때 (팀 전체에 적용)
   else {
     const reach = def.reach ?? c.reach + (def.reachAdd || 0);
     if (def.blink) use = los && aligned && d > 3.5 && d < def.blink + reach;
@@ -651,7 +662,21 @@ function botThink(rm, p, dt, t) {
   const sx = -uz * a.strafe, sz = ux * a.strafe; // 옆 방향
   const prefer = c.ranged ? Math.max(6, c.reach * 0.55) : c.reach * 0.8;
   let mx = 0, mz = 0;
-  if (d > prefer * (c.ranged ? 1.35 : 1) || !los) { mx = ux; mz = uz; }
+  const sdef = SKILLS[c.skill];
+  const support = rm.mode === 'tdm' && sdef && (sdef.heal || (sdef.dur && sdef.radius));
+  let buddy = null;
+  if (support) { // 지원 직업: 가장 가까운(다친 쪽 우선) 아군 곁에 머무름
+    let bs = Infinity;
+    for (const q of rm.players.values()) {
+      if (q === p || !q.alive || q.team !== p.team) continue;
+      const sc = Math.hypot(q.x - p.x, q.z - p.z) - (1 - q.hp / CLASSES[q.cls].hp) * 12;
+      if (sc < bs) { bs = sc; buddy = q; }
+    }
+  }
+  if (buddy && Math.hypot(buddy.x - p.x, buddy.z - p.z) > 6 && d > prefer * 1.2) {
+    const bx = buddy.x - p.x, bz = buddy.z - p.z, bl = Math.hypot(bx, bz) || 1;
+    mx = bx / bl; mz = bz / bl;
+  } else if (d > prefer * (c.ranged ? 1.35 : 1) || !los) { mx = ux; mz = uz; }
   else if (c.ranged && d < prefer * 0.55) { mx = -ux * 0.8; mz = -uz * 0.8; }
   mx += sx * 0.7 * L.strafe; mz += sz * 0.7 * L.strafe;
   if (t < a.avoidUntil) { const ca = Math.cos(1.3 * a.avoidDir), sa = Math.sin(1.3 * a.avoidDir); [mx, mz] = [mx * ca - mz * sa, mx * sa + mz * ca]; }
@@ -719,7 +744,7 @@ function joinRoom(ws, user, m) {
     id, ws, room, name, cls, team: room.assignTeam(), userId: user?.id || null, x: 0, y: 0, z: 0, yaw: 0, pitch: 0,
     hp: CLASSES[cls].hp, alive: true, blocking: false, blockSince: 0, kills: 0, deaths: 0, lastAttack: 0,
     lastState: now(), lastChat: 0, lastEmote: 0, stunUntil: 0, buffUntil: 0, buffDmg: 1, buffSpeed: 1,
-    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), nextCls: null,
+    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), nextCls: null, dmgLog: new Map(),
   };
   Object.assign(p, room.spawnFor(p));
   room.players.set(id, p);
@@ -811,6 +836,9 @@ wss.on('connection', (ws) => {
       rm.broadcast({ t: 'emote', id: p.id, e: m.e });
     } else if (m.t === 'vote') {
       rm.castVote(p, m);
+    } else if (m.t === 'invite') {
+      if (!rm.custom || rm.practice || p.id !== rm.hostId) return;
+      send(ws, { t: 'invite', room: rm.id, pw: rm.password || '' });
     } else if (m.t === 'setbots') {
       if (!rm.custom || p.id !== rm.hostId) return;
       if (Number.isFinite(Number(m.count))) rm.botTarget = clamp(Math.floor(Number(m.count)), rm.practice ? 1 : 0, rm.max - 1);
