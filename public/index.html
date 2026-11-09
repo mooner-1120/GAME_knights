@@ -97,6 +97,7 @@
   #hitmark { position: absolute; left: 50%; top: 50%; width: 34px; height: 34px; margin: -17px 0 0 -17px; opacity: 0; transition: opacity .15s;
     border: 3px solid #ff5a4a; transform: rotate(45deg); }
   #hitmark.blocked { border-color: #cfd8e8; }
+  #hitmark.kill { border-color: #ff2a1a; width: 52px; height: 52px; margin: -26px 0 0 -26px; border-width: 5px; box-shadow: 0 0 12px #ff2a1a; }
   #dmg { position: absolute; inset: 0; opacity: 0; background: radial-gradient(ellipse at center, transparent 40%, rgba(190,20,10,.85)); transition: opacity .35s; }
   #lowhp { position: absolute; inset: 0; opacity: 0; background: radial-gradient(ellipse at center, transparent 55%, rgba(150,0,0,.55)); }
   #lowhp.on { animation: pulse 1s ease-in-out infinite; }
@@ -137,9 +138,13 @@
   .dn { position: absolute; font-size: 26px; font-weight: 700; color: #fff; text-shadow: 0 2px 0 #000, 0 0 6px #000; animation: floatup .9s ease-out forwards; transform: translate(-50%, -50%); }
   .dn.blocked { color: #aab7cf; font-size: 20px; }
   .dn.skill { color: #ffd45a; font-size: 32px; }
+  .dn.big { font-size: 34px; color: #ffb35a; }
+  .dn.kill { font-size: 40px; color: #ff4a3a; }
   @keyframes floatup { 0% { opacity: 0; margin-top: 10px; } 15% { opacity: 1; } 100% { opacity: 0; margin-top: -60px; } }
   #death { position: absolute; left: 0; right: 0; top: 32%; text-align: center; font-size: 44px; color: #e05a4a; text-shadow: 0 3px 10px #000; display: none; }
   #death small { display: block; font-size: 20px; color: #ddd; margin-top: 8px; }
+  #death small.di { font-size: 16px; color: #e9dcb8; margin-top: 4px; }
+  #death small.sp { font-size: 15px; color: #9fd0ff; margin-top: 10px; }
   #stunned { position: absolute; left: 0; right: 0; top: 56%; text-align: center; font-size: 30px; color: #ffe27a; text-shadow: 0 2px 8px #000; display: none; }
   #board { position: absolute; left: 50%; top: 80px; transform: translateX(-50%); min-width: 460px; background: rgba(10,8,5,.82);
     border: 2px solid #6d5a33; border-radius: 6px; padding: 14px 18px; display: none; }
@@ -249,6 +254,7 @@
         <button class="btn2" id="m-botadd" style="display:none"></button>
         <button class="btn2" id="m-botsub" style="display:none"></button>
         <button class="btn2" id="m-diff" style="display:none"></button>
+        <button class="btn2" id="m-invite" style="display:none"></button>
         <button class="btn2" data-view="settings" data-i18n="settings"></button>
         <button class="btn2" data-view="help" data-i18n="controls"></button>
         <button class="btn2 danger" id="m-home" data-i18n="home"></button>

@@ -943,6 +943,9 @@ const remotes = new Map();
 let selectedCls = 'knight';
 let deadUntil = 0;
 let killerName = '';
+let deathInfo = null;   // 사망 요약
+let specId = null;      // 관전 중인 사람
+const specCam = new THREE.Vector3();
 let mouseR = false;
 let pendingJoin = {};
 let crouchPress = false;
@@ -1390,6 +1393,20 @@ function syncRemotes() {
   renderBoard();
 }
 
+// 관전: 살아 있는 다른 사람 중 하나를 따라가는 시점 (죽은 동안 3초)
+function specList() { return [...remotes.values()].filter((r) => r.alive && r.id !== me.id).sort((a, b) => a.id - b.id); }
+function specTarget() {
+  const list = specList();
+  if (!list.length) return null;
+  return list.find((r) => r.id === specId) || list[0];
+}
+function cycleSpec(dir) {
+  const list = specList();
+  if (!list.length) return;
+  const i = Math.max(0, list.findIndex((r) => r.id === specId));
+  specId = list[(i + dir + list.length) % list.length].id;
+  specCam.set(0, 0, 0);
+}
 function actorPos(id) {
   if (id === me.id) return { x: me.x, y: me.y, z: me.z };
   const r = remotes.get(id);
@@ -1488,10 +1505,11 @@ function handle(m) {
       if (pos) burst(pos.x, pos.y + 1.1, pos.z, m.blocked ? 0xcfd8e8 : 0xc23b2e, m.blocked ? 5 : 9);
       if (m.by === me.id && m.id !== me.id) {
         const h = $('hitmark');
-        h.className = m.blocked ? 'blocked' : '';
+        const isKill = m.hp <= 0;
+        h.className = m.blocked ? 'blocked' : isKill ? 'kill' : '';
         h.style.opacity = 1;
-        setTimeout(() => (h.style.opacity = 0), 150);
-        if (pos) dmgNumber(pos.x, pos.y + 2.1, pos.z, (m.tag === 'counter' ? t('counter_tag') : m.tag === 'back' ? t('back_tag') : '') + m.dmg, m.blocked ? 'blocked' : m.skill || m.tag ? 'skill' : '');
+        setTimeout(() => (h.style.opacity = 0), isKill ? 320 : 150);
+        if (pos) dmgNumber(pos.x, pos.y + 2.1, pos.z, (m.tag === 'counter' ? t('counter_tag') : m.tag === 'back' ? t('back_tag') : '') + (m.hp <= 0 ? '☠ ' : '') + m.dmg, m.blocked ? 'blocked' : m.hp <= 0 ? 'kill' : m.skill || m.tag ? 'skill' : m.dmg >= 30 ? 'big' : '');
       }
       m.blocked ? clang(volFor(m.id, 0.35)) : thud(volFor(m.id, 0.5));
       break;
@@ -1508,6 +1526,8 @@ function handle(m) {
         me.streak = 0;
         me.act = null; me.dash = null;
         killerName = nameOf(m.killer);
+        deathInfo = null;
+        specId = m.killer;
         deadUntil = performance.now() + PLAYER.respawnMs;
         $('death').style.display = 'block';
         updateHud();
@@ -1520,6 +1540,7 @@ function handle(m) {
         Object.assign(me, { cls: m.cls, x: m.x, y: m.y, z: m.z, yaw: m.yaw, pitch: 0, hp: m.hp, alive: true });
         if (changed) buildViewmodel();
         $('death').style.display = 'none';
+        deathInfo = null; specId = null;
         updateHud();
         buildCards($('menu-cards'), me.cls, pickClass);
       } else {
@@ -1527,6 +1548,16 @@ function handle(m) {
         if (r) { r.act = null; r.stunUntil = 0; }
       }
       break;
+    case 'deathinfo':
+      deathInfo = m;
+      break;
+    case 'invite': {
+      const link = `${location.origin}/?room=${encodeURIComponent(m.room)}${m.pw ? '&pw=' + encodeURIComponent(m.pw) : ''}`;
+      const done = () => toast(t('invite_copied'));
+      if (navigator.clipboard?.writeText) navigator.clipboard.writeText(link).then(done, () => window.prompt(t('invite_btn'), link));
+      else window.prompt(t('invite_btn'), link);
+      break;
+    }
     case 'correct':
       me.x = m.x; me.y = m.y; me.z = m.z;
       me.dash = null;
@@ -1568,7 +1599,7 @@ function handle(m) {
       ws = null;
       break;
     case 'match':
-      matchInfo = { mode: m.mode, limit: m.limit, teamScore: m.teamScore, over: m.over, hostId: m.hostId, map: m.map, custom: m.custom, room: m.room, remainMs: m.remainMs, bots: m.bots || 0, botTarget: m.botTarget || 0, botDiff: m.botDiff || 3, practice: !!m.practice, at: performance.now() };
+      matchInfo = { mode: m.mode, limit: m.limit, teamScore: m.teamScore, over: m.over, hostId: m.hostId, map: m.map, custom: m.custom, room: m.room, remainMs: m.remainMs, roomId: m.roomId, bots: m.bots || 0, botTarget: m.botTarget || 0, botDiff: m.botDiff || 3, practice: !!m.practice, at: performance.now() };
       applyMap(m.map);
       if (!m.over) { vote = null; clearInterval(endTimer); $('x-end').style.display = 'none'; }
       updateMatchHud();
@@ -1737,6 +1768,7 @@ addEventListener('keydown', (e) => {
   keys[code] = true;
   if (e.repeat || !joined || !locked()) return;
   if (code === 'KeyC') crouchPress = true;
+  if (!me.alive && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) { cycleSpec(e.code === 'ArrowRight' ? 1 : -1); return; }
   if (code === 'KeyQ') useSkill('q');
   if (code === 'KeyE') useSkill('e');
   if (emoteOpen) {
@@ -1772,6 +1804,7 @@ addEventListener('mousemove', (e) => {
 });
 addEventListener('mousedown', (e) => {
   if (IS_TOUCH || !locked() || !joined) return;
+  if (!me.alive) { if (e.button === 0) cycleSpec(1); else if (e.button === 2) cycleSpec(-1); return; }
   if (e.button === 0) tryAttack();
   if (e.button === 2) mouseR = true;
 });
@@ -2114,6 +2147,8 @@ function updateModeBtn() {
   b.style.display = host ? '' : 'none';
   mb.style.display = host ? '' : 'none';
   for (const id of ['m-botadd', 'm-botsub', 'm-diff']) $(id).style.display = host ? '' : 'none';
+  $('m-invite').style.display = host && !matchInfo.practice ? '' : 'none';
+  $('m-invite').textContent = t('invite_btn');
   if (host) {
     b.textContent = `${t('host_mode')} → ${t(matchInfo.mode === 'tdm' ? 'mode_ffa' : 'mode_tdm')}`;
     $('m-botadd').textContent = `${t('host_botadd')} · ${matchInfo.botTarget || 0}`;
@@ -2125,6 +2160,7 @@ function updateModeBtn() {
 $('m-botadd').onclick = () => send({ t: 'setbots', count: (matchInfo.botTarget || 0) + 1 });
 $('m-botsub').onclick = () => send({ t: 'setbots', count: Math.max(0, (matchInfo.botTarget || 0) - 1) });
 $('m-diff').onclick = () => send({ t: 'setbots', diff: ((matchInfo.botDiff || 3) % 5) + 1 });
+$('m-invite').onclick = () => send({ t: 'invite' });
 $('m-map').onclick = () => send({ t: 'setroom', map: MAP_IDS[(MAP_IDS.indexOf(matchInfo.map) + 1) % MAP_IDS.length] });
 setInterval(updateMatchHud, 500);
 setInterval(updateModeBtn, 500);
@@ -2185,6 +2221,15 @@ $('rc-go').onclick = () => {
 };
 document.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { if (b.dataset.tab === 'rooms') refreshRooms(); }));
 setInterval(() => { if ($('tab-rooms').classList.contains('on') && $('lobby').style.display !== 'none') refreshRooms(); }, 5000);
+// 초대 링크(?room=...&pw=...)로 들어온 경우: 그 방으로 입장하도록 준비
+(() => {
+  const q = new URLSearchParams(location.search);
+  const room = q.get('room');
+  if (!room) return;
+  pendingJoin = { room, password: q.get('pw') || '' };
+  $('lobmsg').textContent = t('invite_loaded');
+  try { history.replaceState(null, '', location.pathname); } catch {} // 주소창에서 비밀번호 제거
+})();
 fillRoomForm();
 onLang(() => { fillRoomForm(); refreshRooms(); });
 applyI18n();
@@ -2417,7 +2462,17 @@ function update(dt, nowMs) {
   me.eyeH = lerp(me.eyeH, me.slide ? 0.75 : me.crouching ? 1.15 : PLAYER.eye, Math.min(1, dt * 14)); // 눈높이: 서기 / 웅크리기 / 슬라이딩
   me.slideTilt = lerp(me.slideTilt, me.slide ? 0.07 : 0, Math.min(1, dt * 10));
   const dead = joined && !me.alive;
-  if (!me.debugCam) {
+  const spec = dead ? specTarget() : null;
+  vm.visible = !dead;
+  if (spec && !me.debugCam) {
+    const sp = spec.root.position, sy = spec.yaw;
+    const wx = sp.x + Math.sin(sy) * 3.4, wy = sp.y + 2.3, wz = sp.z + Math.cos(sy) * 3.4;
+    if (specCam.lengthSq() === 0) specCam.set(wx, wy, wz);
+    specCam.x = lerp(specCam.x, wx, Math.min(1, dt * 6)); specCam.y = lerp(specCam.y, wy, Math.min(1, dt * 6)); specCam.z = lerp(specCam.z, wz, Math.min(1, dt * 6));
+    camera.position.copy(specCam);
+    camera.lookAt(sp.x, sp.y + 1.3, sp.z);
+  } else if (!me.debugCam) {
+    specCam.set(0, 0, 0);
     const bob = S.bob ? Math.abs(Math.cos(me.bobPhase)) * 0.035 * me.mv : 0;
     const sh = me.shake * 0.02;
     camera.position.set(me.x + rand(-sh, sh), me.y + (dead ? 0.35 : me.eyeH + bob), me.z + rand(-sh, sh));
@@ -2469,8 +2524,17 @@ function update(dt, nowMs) {
     if (S.minimap && mmTick === 0) drawMinimap();
     if (dead) {
       const left = Math.max(0, Math.ceil((deadUntil - nowMs) / 1000));
-      $('death').innerHTML = esc(t('died')) + '<small></small>';
-      $('death').querySelector('small').textContent = t('killedBy', { n: killerName, s: left });
+      const di = deathInfo;
+      let html = esc(t('died')) + `<small>${esc(t('killedBy', { n: killerName, s: left }))}</small>`;
+      if (di) {
+        const lastS = di.tag === 'counter' ? t('di_counter') : di.skill ? sname(SKILLS[di.skill]) : t('di_basic');
+        html += `<small class="di">${esc(t('di_main', { n: di.name, c: cname(CLASSES[di.cls]), d: di.dmg, h: di.hits }))}</small>`
+          + `<small class="di">${esc(t('di_hp', { a: di.hp, b: di.maxhp }))} · ${esc(t('di_last', { s: lastS }))}</small>`;
+        if (di.assists.length) html += `<small class="di">${esc(t('di_assist', { l: di.assists.map((a) => `${a.name} ${a.dmg}`).join(', ') }))}</small>`;
+      }
+      const stg = specTarget();
+      if (stg) html += `<small class="sp">${esc(t('spec_view', { n: stg.name }))} · ${esc(t('spec_hint'))}</small>`;
+      $('death').innerHTML = html;
     }
   }
 }
