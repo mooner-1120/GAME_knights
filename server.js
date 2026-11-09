@@ -9,25 +9,28 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import zlib from 'zlib';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import {
   CLASSES, SKILLS, MAPS, PLAYER, MATCH, ROOM, CHAT, EMOTES, EMOTE_GAP_MS,
   PROJ, resolveCollision, lineBlocked, projBlocked,
+  levelFor, xpForLevel, REWARD, ACH, ITEMS, ITEM_BY_ID, RARITY, GACHA,
+  MODE_LIST, isTeamMode, MODE_RULES, ITEM_KINDS, ITEM_RESPAWN_MS, ITEM_PICKUP_R,
 } from './classes.js';
-import { dbEnabled, verifyUser, recordMatch } from './db.js';
+import { dbEnabled, verifyUser, recordMatch, loadProgress, saveProgress } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
 const MAX_PLAYERS = Number(process.env.MAX_PLAYERS) || 16; // 공개 방 정원
 const PUBLIC_ROOMS = Math.max(1, Number(process.env.PUBLIC_ROOMS) || 1);
-const DEFAULT_MODE = process.env.MODE === 'tdm' ? 'tdm' : 'ffa';
+const DEFAULT_MODE = MODE_LIST.includes(process.env.MODE) ? process.env.MODE : 'ffa';
 const MOVE_CHECK = process.env.NO_MOVE_CHECK !== '1';
 const REQUIRE_LOGIN = process.env.REQUIRE_LOGIN === '1';
 const TICK_MS = 50;
 const MOVE_SLACK = 3.2; // 달리기 x 버프 x 슬라이딩 + 네트워크 오차 여유
 const EMOTE_IDS = new Set(EMOTES.map((e) => e.id));
-const MODES = ['ffa', 'tdm'];
+const MODES = MODE_LIST;
 
 /* ───────────── 정적 파일 서버 ───────────── */
 const MIME = {
@@ -122,6 +125,8 @@ class Room {
     this.practice = false;        // 연습모드(혼자 하는 비공개 방)
     this.setMap(mapId);
     this.endsAt = now() + MATCH.durationMs;
+    this.initObjectives();
+    if (this.round) this.startRound();
   }
   setMap(id) { this.mapId = MAPS[id] ? id : 'town'; this.map = MAPS[this.mapId]; }
   later(fn, ms) {
@@ -145,16 +150,27 @@ class Room {
     while (bots.length < want) { bots.push(addBot(this)); changed = true; }
     if (changed) { this.broadcast({ t: 'roster', list: this.roster() }); this.broadcast(this.matchState()); }
   }
-  get limit() { return this.mode === 'tdm' ? MATCH.teamKills : MATCH.ffaKills; }
+  get teamMode() { return isTeamMode(this.mode); }
+  get paused() { return !!this.round && !this.round.active; } // 라운드 사이 (공격 불가)
+  get limit() {
+    switch (this.mode) {
+      case 'tdm': return MATCH.teamKills;
+      case 'ctf': return MODE_RULES.ctf.caps;
+      case 'points': return MODE_RULES.points.score;
+      case 'survival': return MODE_RULES.survival.rounds;
+      case 'king': return MODE_RULES.king.rounds;
+      default: return MATCH.ffaKills;
+    }
+  }
   isFoe(a, b) { return this.mode === 'ffa' || a.team !== b.team; }
   roster() {
-    return [...this.players.values()].map((p) => ({ id: p.id, name: p.name, cls: p.cls, team: p.team, kills: p.kills, deaths: p.deaths, user: !!p.userId, bot: !!p.bot }));
+    return [...this.players.values()].map((p) => ({ id: p.id, name: p.name, cls: p.cls, team: p.team, kills: p.kills, deaths: p.deaths, user: !!p.userId, bot: !!p.bot, lv: p.prog ? levelFor(p.prog.xp) : 0, ttl: p.prog?.title || null, eq: eqOf(p) }));
   }
   matchState() {
     return {
       t: 'match', mode: this.mode, map: this.mapId, limit: this.limit, teamScore: this.teamScore, over: this.over,
       hostId: this.custom ? this.hostId : null, custom: this.custom, room: this.name,
-      roomId: this.id, bots: this.botCount, botTarget: this.botTarget, botDiff: this.botDiff, practice: this.practice,
+      obj: this.objState(), roomId: this.id, bots: this.botCount, botTarget: this.botTarget, botDiff: this.botDiff, practice: this.practice,
       remainMs: this.over ? 0 : Math.max(0, this.endsAt - now()), durationMs: MATCH.durationMs,
     };
   }
@@ -169,7 +185,7 @@ class Room {
   }
   spawnFor(p) {
     const sps = this.map.spawns;
-    const pool = this.mode === 'tdm' ? sps.filter((s) => s.team === p.team) : sps;
+    const pool = this.teamMode ? sps.filter((s) => s.team === p.team) : sps;
     const s = pool[Math.floor(Math.random() * pool.length)];
     const x = s.x + (Math.random() - 0.5) * 2;
     const z = s.z + (Math.random() - 0.5) * 2;
@@ -184,7 +200,7 @@ class Room {
   }
   allyTargets(p, radius) {
     const list = [p];
-    if (this.mode === 'tdm' && radius) {
+    if (this.teamMode && radius) {
       for (const q of this.players.values()) {
         if (q !== p && q.alive && q.team === p.team && Math.hypot(q.x - p.x, q.z - p.z) <= radius) list.push(q);
       }
@@ -199,10 +215,12 @@ class Room {
     this.vote = null;
     this.projs = [];
     this.endsAt = now() + MATCH.durationMs;
+    this.initObjectives();
     for (const p of this.players.values()) {
-      p.kills = 0; p.deaths = 0;
+      p.kills = 0; p.deaths = 0; p.streak = 0; p.matchStart = now(); p.king = false;
       respawn(this, p.id, true);
     }
+    if (this.round) this.startRound();
     this.broadcast({ t: 'roster', list: this.roster() });
     this.broadcast(this.matchState());
   }
@@ -211,7 +229,7 @@ class Room {
     if (mode) this.mode = mode;
     if (mapId) this.setMap(mapId);
     let i = 0;
-    for (const p of this.players.values()) p.team = this.mode === 'tdm' ? (i++ % 2) + 1 : 0;
+    for (const p of this.players.values()) p.team = this.teamMode ? (i++ % 2) + 1 : 0;
     this.resetMatch();
   }
   endMatch(winnerPlayer, winnerTeam, draw) {
@@ -225,11 +243,12 @@ class Room {
       draw: !!draw, teamScore: this.teamScore, board, nextMs,
     });
     this.broadcast(this.matchState());
+    awardMatch(this, winnerPlayer, winnerTeam, draw);
     if (this.botCount === 0) recordMatch({ // AI가 섞인 판은 전적에 기록하지 않음(연습용)
       mode: this.mode, winner_team: winnerTeam ?? null,
       rows: [...this.players.values()].map((p) => ({
         user_id: p.userId || null, name: p.name, class_id: p.cls, team: p.team, kills: p.kills, deaths: p.deaths,
-        won: !draw && (this.mode === 'tdm' ? p.team === winnerTeam : p.id === winnerPlayer?.id),
+        won: !draw && (this.teamMode ? p.team === winnerTeam : p.id === winnerPlayer?.id),
       })),
     });
     if (this.custom) this.later(() => this.startNewMatch(), MATCH.customRestartMs);
@@ -237,7 +256,7 @@ class Room {
   }
   // 시간 종료: 가장 많이 처치한 사람/팀이 승리, 같으면 무승부
   timeUp() {
-    if (this.mode === 'tdm') {
+    if (this.teamMode) {
       const a = this.teamScore[1], b = this.teamScore[2];
       return a === b ? this.endMatch(null, null, true) : this.endMatch(null, a > b ? 1 : 2, false);
     }
@@ -286,10 +305,6 @@ class Room {
   }
 }
 
-for (let i = 1; i <= PUBLIC_ROOMS; i++) {
-  const r = new Room({ name: `Arena ${i}`, custom: false, max: MAX_PLAYERS, mode: DEFAULT_MODE, mapId: 'town' });
-  rooms.set(r.id, r);
-}
 
 /* ───────────── 전투 ───────────── */
 function push(q, nx, nz, dist) {
@@ -301,18 +316,33 @@ function stun(q, ms) {
   q.blocking = false;
   q.room.broadcast({ t: 'stun', id: q.id, ms });
 }
-function heal(q, amt) {
+function heal(q, amt, by) {
   const before = q.hp;
   q.hp = Math.min(CLASSES[q.cls].hp, q.hp + amt);
+  if (by && by !== q && q.hp > before) bump(by, 'heals', Math.round(q.hp - before));
   if (q.hp > before) q.room.broadcast({ t: 'heal', id: q.id, amt: Math.round(q.hp - before), hp: q.hp });
 }
 
-function kill(p, q, o) {
+function kill(p, q, o, tag) {
   const rm = p.room;
   q.alive = false; q.blocking = false; q.stunUntil = 0; q.buffUntil = 0;
   q.deaths++; p.kills++;
+  p.streak = (p.streak || 0) + 1; q.streak = 0;
+  if (rm.botCount === 0) { // 성장 기록은 사람끼리의 판에서만 (AI 파밍 방지)
+    if (p.prog) {
+      bump(p, 'kills'); setMax(p, 'maxstreak', p.streak); stat(p, p.cls, 'kills');
+      if (p.stance === 2 && !o?.ranged) bump(p, 'slidekills');
+      if (tag === 'back') bump(p, 'backstabs');
+      if (o?.counter) bump(p, 'counterkills');
+      if (o?.ranged && Math.hypot(p.x - q.x, p.z - q.z) >= 25) bump(p, 'longshots');
+      if (q.king) bump(p, 'kingkills');
+      checkAch(p);
+    }
+    if (q.prog) stat(q, q.cls, 'deaths');
+  }
   if (q.bot && Math.random() < 0.5) q.nextCls = BOT_CLASSES[Math.floor(Math.random() * BOT_CLASSES.length)];
   if (rm.mode === 'tdm') rm.teamScore[p.team]++;
+  if (rm.flags) rm.dropFlagOf(q); // 깃발을 들고 있었다면 그 자리에 떨어뜨림
   rm.broadcast({ t: 'kill', killer: p.id, victim: q.id });
   {
     const lg = q.dmgLog || new Map(), me = lg.get(p.id) || { dmg: 0, hits: 0 };
@@ -322,8 +352,9 @@ function kill(p, q, o) {
   }
   rm.broadcast({ t: 'roster', list: rm.roster() });
   rm.broadcast(rm.matchState());
-  rm.later(() => respawn(rm, q.id), PLAYER.respawnMs);
-  if (rm.mode === 'tdm' ? rm.teamScore[p.team] >= rm.limit : p.kills >= rm.limit) {
+  if (rm.mode !== 'survival') rm.later(() => respawn(rm, q.id), PLAYER.respawnMs); // 생존전은 다음 라운드까지 부활 없음
+  if (rm.mode === 'king' && q.king && rm.round?.active) return rm.endRound(p.team);    // 왕이 쓰러지면 라운드 종료
+  if (rm.mode === 'ffa' ? p.kills >= rm.limit : rm.mode === 'tdm' && rm.teamScore[p.team] >= rm.limit) {
     rm.endMatch(rm.mode === 'tdm' ? null : p, rm.mode === 'tdm' ? p.team : null, false);
   }
 }
@@ -332,7 +363,7 @@ function kill(p, q, o) {
 // 근접은 즉시 판정, 원거리(화살·마법탄)는 launch()로 실제 투사체를 날립니다.
 function strike(p, o) {
   const rm = p.room;
-  if (!rm || !p.alive || rm.over) return;
+  if (!rm || !p.alive || rm.over || rm.paused) return;
   if (o.ranged) return launch(p, o);
   const fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);
   for (const q of rm.players.values()) {
@@ -362,13 +393,14 @@ function applyHit(p, q, o, dx, dz, dist) {
   if (guarding && !o.ranged && t - q.blockSince <= PLAYER.parryMs) {
     q.counterUntil = t + PLAYER.counterWindowMs;
     rm.broadcast({ t: 'parry', id: q.id, by: p.id });
+    bump(q, 'parries');
     stun(p, PLAYER.parryStunMs);
     return;
   }
   let mult = 1, tag = null;
   if (o.counter) { mult *= PLAYER.counterMult; tag = 'counter'; }
   if (c.backstab && dist > 0.01 && (tfx * dx + tfz * dz) / dist > 0.5) { mult *= c.backstab; tag = 'back'; }
-  const dmg = Math.max(1, Math.round(o.dmg * mult * (guarding ? 1 - qc.block : 1)));
+  const dmg = Math.max(1, Math.round(o.dmg * mult * (guarding ? 1 - qc.block : 1) * (q.king ? MODE_RULES.king.dmgTaken : 1)));
 
   q.hp = Math.max(0, q.hp - dmg);
   const lg = q.dmgLog || (q.dmgLog = new Map()); // 사망 요약용: 누가 얼마나 때렸는지
@@ -376,6 +408,7 @@ function applyHit(p, q, o, dx, dz, dist) {
   le.dmg += dmg; le.hits++; le.name = p.name; le.cls = p.cls; le.skill = o.skill || null; le.t = t;
   lg.set(p.id, le);
   rm.broadcast({ t: 'hit', id: q.id, by: p.id, dmg, hp: q.hp, blocked: guarding, skill: o.skill || null, tag });
+  if (o.skill === 'kick') bump(p, 'kicks');
   if (o.lifesteal) heal(p, dmg * o.lifesteal);
   if (o.selfHeal) heal(p, o.selfHeal);
 
@@ -386,7 +419,7 @@ function applyHit(p, q, o, dx, dz, dist) {
     }
     if (o.stun && !guarding) stun(q, o.stun);
   } else {
-    kill(p, q, o);
+    kill(p, q, o, tag);
   }
 }
 
@@ -473,7 +506,7 @@ function respawn(rm, id, force = false) {
 // 기본 공격 (사람과 AI 공용)
 function doAttack(p) {
   const rm = p.room;
-  if (!p.alive || isStunned(p) || rm.over) return false;
+  if (!p.alive || isStunned(p) || rm.over || rm.paused) return false;
   const c = CLASSES[p.cls];
   const t = now();
   if (t - p.lastAttack < c.cooldown * 1000 - 30) return false;
@@ -491,6 +524,7 @@ function doAttack(p) {
 
 function useSkill(p, slot) {
   const rm = p.room;
+  if (rm.over || rm.paused) return;
   const c = CLASSES[p.cls];
   const id = slot === 'e' ? 'kick' : c.skill;
   const def = SKILLS[id];
@@ -503,7 +537,7 @@ function useSkill(p, slot) {
 
   if (def.heal || def.dur) {
     for (const q of rm.allyTargets(p, def.radius)) {
-      if (def.heal) heal(q, def.heal);
+      if (def.heal) heal(q, def.heal, p);
       if (def.dur) {
         q.buffUntil = t + def.dur; q.buffDmg = def.dmgMult || 1; q.buffSpeed = def.speedMult || 1;
         rm.broadcast({ t: 'buff', id: q.id, ms: def.dur, dmg: q.buffDmg, speed: q.buffSpeed });
@@ -538,6 +572,356 @@ function useSkill(p, slot) {
 }
 
 
+
+
+/* ───────────── 게임 모드 목표물 (깃발 · 거점 · 라운드 · 아이템) ───────────── */
+Room.prototype.initObjectives = function initObjectives() {
+  const o = this.map.obj;
+  this.flags = null; this.points = null; this.round = null; this.kings = null;
+  if (this.mode === 'ctf') {
+    const mk = (team) => ({ team, hx: o.flags[team].x, hz: o.flags[team].z, x: o.flags[team].x, z: o.flags[team].z, state: 'home', carrier: null, dropAt: 0 });
+    this.flags = { 1: mk(1), 2: mk(2) };
+  }
+  if (this.mode === 'points') this.points = o.points.map((p) => ({ x: p.x, z: p.z, balance: 0, owner: 0 }));
+  if (this.mode === 'survival' || this.mode === 'king') this.round = { n: 0, active: false, endsAt: 0 };
+  this.items = o.items.map((it) => ({ ...it, active: true, respawnAt: 0 }));
+  this.ptClock = 0;
+  this.lastObj = 0;
+};
+Room.prototype.objState = function objState() {
+  const o = { items: this.items.map((i) => (i.active ? 1 : 0)) };
+  if (this.flags) o.flags = [1, 2].map((tm) => { const f = this.flags[tm]; return { s: f.state, c: f.carrier, x: +f.x.toFixed(1), z: +f.z.toFixed(1) }; });
+  if (this.points) o.pts = this.points.map((p) => ({ o: p.owner, b: Math.round(p.balance) }));
+  if (this.round) {
+    const alive = [0, 0, 0];
+    for (const p of this.players.values()) if (p.alive && p.team) alive[p.team]++;
+    o.round = { n: this.round.n, active: this.round.active, remainMs: this.round.active ? Math.max(0, this.round.endsAt - now()) : 0, alive: [alive[1], alive[2]] };
+  }
+  if (this.kings) o.kings = [this.kings[1] ?? null, this.kings[2] ?? null];
+  return o;
+};
+Room.prototype.objEvent = function objEvent(ev, p, team) { this.broadcast({ t: 'objevent', ev, by: p?.id ?? null, team: team ?? p?.team ?? 0 }); };
+Room.prototype.dropFlagOf = function dropFlagOf(p) {
+  if (!this.flags) return;
+  for (const tm of [1, 2]) {
+    const f = this.flags[tm];
+    if (f.state === 'carried' && f.carrier === p.id) {
+      f.state = 'dropped'; f.carrier = null; f.x = p.x; f.z = p.z; f.dropAt = now();
+      this.objEvent('drop', p, tm);
+      this.broadcast({ t: 'obj', obj: this.objState() });
+    }
+  }
+};
+Room.prototype.startRound = function startRound() {
+  const r = this.round;
+  r.n++; r.active = true;
+  r.endsAt = now() + MODE_RULES[this.mode].roundMs;
+  this.projs = [];
+  this.kings = null;
+  for (const p of this.players.values()) { p.king = false; respawn(this, p.id, true); }
+  if (this.mode === 'king') {
+    this.kings = {};
+    for (const tm of [1, 2]) {
+      const mem = [...this.players.values()].filter((p) => p.team === tm);
+      if (mem.length) { const k = mem[Math.floor(Math.random() * mem.length)]; k.king = true; this.kings[tm] = k.id; }
+    }
+  }
+  this.broadcast({ t: 'roundstart', n: r.n, mode: this.mode, kings: this.kings ? [this.kings[1] ?? null, this.kings[2] ?? null] : null });
+  this.broadcast({ t: 'roster', list: this.roster() });
+  this.broadcast(this.matchState());
+};
+Room.prototype.endRound = function endRound(winner) {
+  const r = this.round;
+  if (!r || !r.active || this.over) return;
+  r.active = false;
+  this.projs = [];
+  const rules = MODE_RULES[this.mode];
+  if (winner) {
+    this.teamScore[winner]++;
+    for (const p of this.players.values()) if (p.team === winner && p.prog) { bump(p, 'roundwins'); checkAch(p); }
+  }
+  this.broadcast({ t: 'roundend', winner: winner || 0, scores: this.teamScore, nextMs: rules.pauseMs, n: r.n });
+  this.broadcast(this.matchState());
+  if (winner && this.teamScore[winner] >= this.limit) return this.endMatch(null, winner, false);
+  this.later(() => { if (this.round === r && !this.over) this.startRound(); }, rules.pauseMs);
+};
+function applyItem(rm, p, it) {
+  const k = ITEM_KINDS[it.kind], t = now();
+  if (it.kind === 'health') return heal(p, k.heal);
+  const active = p.buffUntil > t;
+  p.buffUntil = Math.max(p.buffUntil, t + k.ms);
+  p.buffDmg = active ? p.buffDmg : 1;
+  p.buffSpeed = active ? p.buffSpeed : 1;
+  if (it.kind === 'speed') p.buffSpeed = Math.max(p.buffSpeed, k.mult);
+  if (it.kind === 'rage') p.buffDmg = Math.max(p.buffDmg, k.mult);
+  rm.broadcast({ t: 'buff', id: p.id, ms: k.ms, dmg: p.buffDmg, speed: p.buffSpeed });
+}
+Room.prototype.stepMode = function stepMode(dt) {
+  if (this.over) return;
+  const t = now();
+  let changed = false, moving = false;
+  const alive = [...this.players.values()].filter((p) => p.alive);
+  // 아이템
+  for (let i = 0; i < this.items.length; i++) {
+    const it = this.items[i];
+    if (!it.active) { if (t >= it.respawnAt) { it.active = true; changed = true; this.broadcast({ t: 'item', i, active: true }); } continue; }
+    for (const p of alive) {
+      if (Math.hypot(p.x - it.x, p.z - it.z) > ITEM_PICKUP_R) continue;
+      if (it.kind === 'health' && p.hp >= CLASSES[p.cls].hp) continue;
+      applyItem(this, p, it);
+      it.active = false; it.respawnAt = t + ITEM_RESPAWN_MS; changed = true;
+      this.broadcast({ t: 'item', i, active: false, by: p.id, kind: it.kind });
+      break;
+    }
+  }
+  if (!this.paused) {
+    // 깃발 뺏기
+    if (this.flags) {
+      const rules = MODE_RULES.ctf;
+      for (const tm of [1, 2]) {
+        const f = this.flags[tm];
+        if (f.state === 'carried') {
+          const c = this.players.get(f.carrier);
+          if (!c || !c.alive) this.dropFlagOf(c || { id: f.carrier, x: f.x, z: f.z });
+          else { f.x = c.x; f.z = c.z; moving = true; }
+        } else if (f.state === 'dropped' && t - f.dropAt >= rules.returnMs) {
+          f.state = 'home'; f.x = f.hx; f.z = f.hz; changed = true; this.objEvent('return', null, tm);
+        }
+      }
+      for (const p of alive) {
+        const mine = this.flags[p.team], enemy = this.flags[3 - p.team];
+        if (!mine || !enemy) continue;
+        if (enemy.state !== 'carried' && Math.hypot(p.x - enemy.x, p.z - enemy.z) < rules.grab) {
+          enemy.state = 'carried'; enemy.carrier = p.id; changed = true; this.objEvent('pickup', p, enemy.team);
+        } else if (mine.state === 'dropped' && Math.hypot(p.x - mine.x, p.z - mine.z) < rules.grab) {
+          mine.state = 'home'; mine.x = mine.hx; mine.z = mine.hz; changed = true; this.objEvent('return', p, mine.team);
+        }
+        if (enemy.carrier === p.id && mine.state === 'home' && Math.hypot(p.x - mine.hx, p.z - mine.hz) < rules.grab + 0.8) {
+          enemy.state = 'home'; enemy.carrier = null; enemy.x = enemy.hx; enemy.z = enemy.hz;
+          this.teamScore[p.team]++; bump(p, 'caps'); checkAch(p);
+          this.objEvent('capture', p, p.team);
+          this.broadcast(this.matchState());
+          if (this.teamScore[p.team] >= this.limit) return this.endMatch(null, p.team, false);
+        }
+      }
+    }
+    // 거점 점령
+    if (this.points) {
+      const rules = MODE_RULES.points;
+      for (const pt of this.points) {
+        let c1 = 0, c2 = 0;
+        for (const p of alive) if (Math.hypot(p.x - pt.x, p.z - pt.z) <= rules.radius) { if (p.team === 1) c1++; else if (p.team === 2) c2++; }
+        if (c1 && !c2) { pt.balance = Math.max(-100, pt.balance - rules.rate * Math.min(c1, 3) * dt); moving = true; }
+        else if (c2 && !c1) { pt.balance = Math.min(100, pt.balance + rules.rate * Math.min(c2, 3) * dt); moving = true; }
+        const before = pt.owner;
+        if (pt.balance <= -100) pt.owner = 1;
+        else if (pt.balance >= 100) pt.owner = 2;
+        else if (pt.owner === 1 && pt.balance > -50) pt.owner = 0;
+        else if (pt.owner === 2 && pt.balance < 50) pt.owner = 0;
+        if (pt.owner !== before) { changed = true; this.objEvent(pt.owner ? 'ptcap' : 'ptlost', null, pt.owner || before); }
+      }
+      this.ptClock += dt;
+      if (this.ptClock >= 1) {
+        this.ptClock -= 1;
+        for (const pt of this.points) {
+          if (!pt.owner) continue;
+          this.teamScore[pt.owner]++; changed = true;
+          for (const p of alive) if (p.team === pt.owner && Math.hypot(p.x - pt.x, p.z - pt.z) <= rules.radius) { bump(p, 'ptscore'); checkAch(p); }
+        }
+        for (const tm of [1, 2]) if (this.teamScore[tm] >= this.limit) { this.broadcast(this.matchState()); return this.endMatch(null, tm, false); }
+        this.broadcast(this.matchState());
+      }
+    }
+    // 라운드 (생존전 / 왕 지키기)
+    if (this.round && this.round.active) {
+      if (this.mode === 'survival') {
+        const tot = [0, 0, 0], al = [0, 0, 0];
+        for (const p of this.players.values()) if (p.team) { tot[p.team]++; if (p.alive) al[p.team]++; }
+        if (tot[1] > 0 && tot[2] > 0 && (al[1] === 0 || al[2] === 0)) return this.endRound(al[1] > 0 ? 1 : al[2] > 0 ? 2 : 0);
+      }
+      if (t >= this.round.endsAt) {
+        let w = 0;
+        if (this.mode === 'survival') {
+          const hp = [0, 0, 0], al = [0, 0, 0];
+          for (const p of alive) { if (p.team) { al[p.team]++; hp[p.team] += p.hp; } }
+          w = al[1] !== al[2] ? (al[1] > al[2] ? 1 : 2) : hp[1] !== hp[2] ? (hp[1] > hp[2] ? 1 : 2) : 0;
+        }
+        return this.endRound(w);
+      }
+    }
+  }
+  if (changed || (moving && t - this.lastObj >= 250)) { this.lastObj = t; this.broadcast({ t: 'obj', obj: this.objState() }); }
+};
+setInterval(() => { for (const rm of rooms.values()) if (rm.humans) rm.stepMode(0.05); }, 50); // 모드 목표물 (20Hz)
+
+/* ───────────── 성장 (레벨 · 코인 · 업적 · 칭호 · 뽑기 · 꾸미기) ─────────────
+   로그인한 사람만. 진행도는 서버 메모리에서 계산하고 Supabase 에 저장합니다(클라이언트는 수정 불가). */
+const MIN_PLAY_MS = Number(process.env.MIN_PLAY_MS ?? REWARD.minPlayMs); // 이 시간 이상 뛴 사람만 보상
+const PROGS = new Map();      // userId → 진행도 (그 사람이 접속해 있는 동안만 보관)
+const PROG_REFS = new Map();  // userId → 이 계정을 쓰는 연결 수 (로비 연결 + 게임 연결)
+const saveChain = new Map();  // userId → 진행 중인 저장 (순서 보장)
+async function getProg(userId) {
+  const wait = saveChain.get(userId);
+  if (wait) await wait;
+  if (PROGS.has(userId)) return PROGS.get(userId);
+  const prog = await loadProgress(userId);
+  if (!prog) return null;
+  prog.dirty = new Set();
+  PROGS.set(userId, prog);
+  return prog;
+}
+async function acquireProg(ws, userId) {
+  if (ws.progUser !== userId) { releaseProg(ws); ws.progUser = userId; PROG_REFS.set(userId, (PROG_REFS.get(userId) || 0) + 1); }
+  ws.prog = await getProg(userId);
+  return ws.prog;
+}
+function releaseProg(ws) {
+  const id = ws.progUser;
+  if (!id) return;
+  ws.progUser = null; ws.prog = null;
+  const n = (PROG_REFS.get(id) || 1) - 1;
+  if (n <= 0) { PROG_REFS.delete(id); flushProg(id); PROGS.delete(id); } else PROG_REFS.set(id, n);
+}
+function flushProg(userId) {
+  const prog = PROGS.get(userId);
+  if (!prog) return;
+  const dirty = [...prog.dirty];
+  prog.dirty.clear();
+  const snap = JSON.parse(JSON.stringify({ ...prog, dirty: undefined }));
+  const prev = saveChain.get(userId) || Promise.resolve();
+  const next = prev.then(() => saveProgress(userId, snap, dirty)).catch(() => {}).finally(() => { if (saveChain.get(userId) === next) saveChain.delete(userId); });
+  saveChain.set(userId, next);
+}
+const eqOf = (p) => (p.bot ? p.eq || {} : p.prog?.equipped || {});
+function randomBotEq() {
+  const pick = (slot) => { const l = ITEMS.filter((i) => i.slot === slot && (i.rar === 'common' || i.rar === 'rare')); return l[Math.floor(Math.random() * l.length)].id; };
+  const eq = {};
+  if (Math.random() < 0.6) eq.cape = pick('cape');
+  if (Math.random() < 0.5) eq.hat = pick('hat');
+  return eq;
+}
+const classesWithKills = (g) => Object.values(g.stats).filter((x) => x.kills > 0).length;
+function bump(p, key, n = 1) {
+  if (!p.prog || (p.room && p.room.botCount)) return;
+  p.prog.counters[key] = (p.prog.counters[key] || 0) + n;
+}
+function setMax(p, key, v) {
+  if (!p.prog || (p.room && p.room.botCount)) return;
+  if (v > (p.prog.counters[key] || 0)) p.prog.counters[key] = v;
+}
+function stat(p, cls, key) {
+  const g = p.prog;
+  if (!g) return;
+  const st = g.stats[cls] || (g.stats[cls] = { kills: 0, deaths: 0, wins: 0, matches: 0 });
+  st[key]++;
+  g.dirty.add(cls);
+}
+function checkAch(p) {
+  const g = p.prog;
+  if (!g) return;
+  let got = false;
+  for (const a of ACH) {
+    if (g.ach[a.id]) continue;
+    const v = a.c === 'classes' ? classesWithKills(g) : g.counters[a.c] || 0;
+    if (v >= a.goal) {
+      g.ach[a.id] = Date.now();
+      g.coins += a.coins;
+      got = true;
+      send(p.ws, { t: 'ach', id: a.id, coins: a.coins, title: !!a.title });
+    }
+  }
+  if (got) { sendProfile(p); flushProg(p.userId); }
+}
+function profileOf(g) {
+  const lv = levelFor(g.xp);
+  return {
+    t: 'profile', xp: g.xp, level: lv, curXp: xpForLevel(lv), nextXp: lv >= 50 ? null : xpForLevel(lv + 1), coins: g.coins, title: g.title,
+    equipped: g.equipped, owned: g.owned, ach: g.ach, counters: { ...g.counters, classes: classesWithKills(g) }, stats: g.stats,
+  };
+}
+function sendProfile(p) { if (p.prog) send(p.ws, profileOf(p.prog)); }
+
+// 한 판이 끝났을 때 경험치/코인 지급
+function awardMatch(rm, winnerPlayer, winnerTeam, draw) {
+  const f = rm.botCount ? REWARD.botFactor : 1;
+  for (const p of rm.players.values()) {
+    if (p.bot || !p.prog || now() - (p.matchStart || 0) < MIN_PLAY_MS) continue;
+    const g = p.prog;
+    const won = !draw && (rm.mode === 'ffa' ? p.id === winnerPlayer?.id : p.team === winnerTeam);
+    const xp = Math.round((REWARD.xpBase + REWARD.xpKill * p.kills + (won ? REWARD.xpWin : draw ? REWARD.xpDraw : 0)) * f);
+    let coins = Math.round((REWARD.coinBase + REWARD.coinKill * p.kills + (won ? REWARD.coinWin : draw ? REWARD.coinDraw : 0)) * f);
+    const before = levelFor(g.xp);
+    g.xp += xp;
+    const after = levelFor(g.xp);
+    const lvBonus = (after - before) * REWARD.levelUpCoins;
+    g.coins += coins + lvBonus;
+    if (!rm.botCount) {
+      bump(p, 'matches');
+      if (won) bump(p, 'wins');
+      stat(p, p.cls, 'matches');
+      if (won) stat(p, p.cls, 'wins');
+    }
+    send(p.ws, { t: 'matchreward', xp, coins: coins + lvBonus, level: after, levelUp: after > before, won, draw: !!draw, practice: f < 1 });
+    checkAch(p);
+    sendProfile(p);
+    flushProg(p.userId);
+  }
+}
+
+// 뽑기: 코인으로만 (결제 없음). 확률은 RARITY 가중치, 30번째까지 에픽 이상이 없으면 확정
+function pickRarity(list) {
+  const tot = list.reduce((a, k) => a + RARITY[k].w, 0);
+  let r = crypto.randomInt(0, tot);
+  for (const k of list) { if (r < RARITY[k].w) return k; r -= RARITY[k].w; }
+  return list[0];
+}
+function rollGacha(g) {
+  g.counters.pity = (g.counters.pity || 0) + 1;
+  const rar = g.counters.pity >= GACHA.pityAt ? pickRarity(['epic', 'legendary']) : pickRarity(Object.keys(RARITY));
+  if (rar === 'epic' || rar === 'legendary') g.counters.pity = 0;
+  const pool = ITEMS.filter((i) => i.rar === rar);
+  const item = pool[crypto.randomInt(0, pool.length)];
+  const dup = g.owned.includes(item.id);
+  const refund = dup ? RARITY[item.rar].refund : 0;
+  if (dup) g.coins += refund; else g.owned.push(item.id);
+  return { id: item.id, rar: item.rar, dup, refund };
+}
+function handleGacha(ws, n) {
+  const g = ws.prog;
+  if (!g) return send(ws, { t: 'gachaerr', code: 'login' });
+  n = n === 10 ? 10 : 1;
+  const cost = n === 10 ? GACHA.cost10 : GACHA.cost1;
+  if (g.coins < cost) return send(ws, { t: 'gachaerr', code: 'coins' });
+  g.coins -= cost;
+  const results = [];
+  for (let i = 0; i < n; i++) results.push(rollGacha(g));
+  flushProg(ws.progUser);
+  send(ws, { t: 'gacharesult', items: results, coins: g.coins, pity: g.counters.pity || 0 });
+  send(ws, profileOf(g));
+}
+function handleEquip(ws, m) {
+  const g = ws.prog;
+  if (!g || (m.slot !== 'cape' && m.slot !== 'hat')) return;
+  if (m.id == null) delete g.equipped[m.slot];
+  else {
+    const it = ITEM_BY_ID[m.id];
+    if (!it || it.slot !== m.slot || !g.owned.includes(it.id)) return;
+    g.equipped[m.slot] = it.id;
+  }
+  flushProg(ws.progUser);
+  send(ws, profileOf(g));
+  if (ws.room) ws.room.broadcast({ t: 'roster', list: ws.room.roster() });
+}
+function handleTitle(ws, id) {
+  const g = ws.prog;
+  if (!g) return;
+  if (id == null) g.title = null;
+  else { const a = ACH.find((x) => x.id === id); if (!a || !a.title || !g.ach[id]) return; g.title = id; }
+  flushProg(ws.progUser);
+  send(ws, profileOf(g));
+  if (ws.room) ws.room.broadcast({ t: 'roster', list: ws.room.roster() });
+}
+
 /* ───────────── AI 봇 ─────────────
    서버가 직접 움직이는 가짜 플레이어. 난이도 1~5:
    react 반응속도(초) / turn 회전속도(rad/s) / err 조준 오차(rad) / speed 이동 배율 /
@@ -561,8 +945,8 @@ function addBot(rm) {
     id, ws: BOT_WS, room: rm, name: 'Knight', cls, team: rm.assignTeam(), userId: null, bot: true, x: 0, y: 0, z: 0, yaw: 0, pitch: 0,
     hp: CLASSES[cls].hp, alive: true, blocking: false, blockSince: 0, kills: 0, deaths: 0, lastAttack: 0,
     lastState: now(), lastChat: 0, lastEmote: 0, stunUntil: 0, buffUntil: 0, buffDmg: 1, buffSpeed: 1,
-    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), nextCls: null, stance: 0, dmgLog: new Map(),
-    ai: { target: null, retargetAt: 0, actAt: 0, skillAt: 0, strafe: 1, strafeAt: 0, errYaw: 0, errPitch: 0, errAt: 0, blockAt: 0, blockEnd: 0, seen: 0, dash: null, avoidUntil: 0, avoidDir: 1, lx: 0, lz: 0, lcheck: 0 },
+    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), nextCls: null, stance: 0, dmgLog: new Map(), eq: randomBotEq(), matchStart: now(), streak: 0,
+    ai: { obj: Math.random() < 0.65, target: null, retargetAt: 0, actAt: 0, skillAt: 0, strafe: 1, strafeAt: 0, errYaw: 0, errPitch: 0, errAt: 0, blockAt: 0, blockEnd: 0, seen: 0, dash: null, avoidUntil: 0, avoidDir: 1, lx: 0, lz: 0, lcheck: 0 },
   };
   Object.assign(p, rm.spawnFor(p));
   rm.players.set(id, p);
@@ -570,7 +954,7 @@ function addBot(rm) {
 }
 
 Room.prototype.stepBots = function stepBots(dt) {
-  if (this.over) return;
+  if (this.over || this.paused) return;
   const t = now();
   for (const p of this.players.values()) if (p.bot && p.alive) botThink(this, p, dt, t);
 };
@@ -580,9 +964,9 @@ function botSkill(rm, p, tg, d, los, aligned, L, t) {
   if (!def || t < (p.cds[id] || 0)) return false;
   const a = p.ai;
   let use = false;
-  const allies = rm.mode === 'tdm' ? [...rm.players.values()].filter((q) => q !== p && q.alive && q.team === p.team && Math.hypot(q.x - p.x, q.z - p.z) <= (def.radius || 0)) : [];
+  const allies = rm.teamMode ? [...rm.players.values()].filter((q) => q !== p && q.alive && q.team === p.team && Math.hypot(q.x - p.x, q.z - p.z) <= (def.radius || 0)) : [];
   if (def.heal) use = p.hp < c.hp * 0.55 || allies.some((q) => q.hp < CLASSES[q.cls].hp * 0.6); // 팀전에선 다친 아군도 치유
-  else if (def.dur) use = d < 16 && (allies.length > 0 || !def.radius || rm.mode !== 'tdm');       // 버프는 아군이 가까이 있을 때 (팀 전체에 적용)
+  else if (def.dur) use = d < 16 && (allies.length > 0 || !def.radius || !rm.teamMode);       // 버프는 아군이 가까이 있을 때 (팀 전체에 적용)
   else {
     const reach = def.reach ?? c.reach + (def.reachAdd || 0);
     if (def.blink) use = los && aligned && d > 3.5 && d < def.blink + reach;
@@ -594,6 +978,36 @@ function botSkill(rm, p, tg, d, los, aligned, L, t) {
   useSkill(p, 'q');
   if (def.dash) a.dash = { dx: -Math.sin(p.yaw), dz: -Math.cos(p.yaw), speed: def.dash.speed, end: t + def.dash.dur * 1000 };
   return true;
+}
+
+
+// 봇이 모드 목표를 향해 움직이게: 깃발·거점·체력 아이템
+function botGoal(rm, p) {
+  const c = CLASSES[p.cls];
+  if (p.hp < c.hp * 0.45) { // 다쳤으면 가까운 체력 물약
+    let best = null, bd = 30;
+    for (const it of rm.items) if (it.active && it.kind === 'health') { const d = Math.hypot(it.x - p.x, it.z - p.z); if (d < bd) { bd = d; best = it; } }
+    if (best) return { x: best.x, z: best.z, priority: true };
+  }
+  if (!p.ai.obj) return null; // 일부 봇은 목표 대신 싸움에 집중
+  if (rm.flags) {
+    const mine = rm.flags[p.team], enemy = rm.flags[3 - p.team];
+    if (!mine || !enemy) return null;
+    if (enemy.carrier === p.id) return { x: mine.hx, z: mine.hz, priority: true };
+    if (mine.state === 'dropped') return { x: mine.x, z: mine.z };
+    if (mine.state === 'carried') return { x: mine.x, z: mine.z }; // 내 깃발을 든 적을 추격
+    return { x: enemy.x, z: enemy.z };
+  }
+  if (rm.points) {
+    let best = null, bd = Infinity;
+    for (const pt of rm.points) {
+      if (pt.owner === p.team) continue;
+      const d = Math.hypot(pt.x - p.x, pt.z - p.z);
+      if (d < bd) { bd = d; best = pt; }
+    }
+    return best ? { x: best.x, z: best.z } : null;
+  }
+  return null;
 }
 
 function botThink(rm, p, dt, t) {
@@ -613,7 +1027,8 @@ function botThink(rm, p, dt, t) {
     let best = null, bs = Infinity;
     for (const q of rm.players.values()) {
       if (q === p || !q.alive || !rm.isFoe(p, q)) continue;
-      const sc = Math.hypot(q.x - p.x, q.z - p.z) + (q.bot ? 0 : -5) + (lineBlocked(p.x, p.z, q.x, q.z, rm.map) ? 8 : 0);
+      const sc = Math.hypot(q.x - p.x, q.z - p.z) + (q.bot ? 0 : -5) + (lineBlocked(p.x, p.z, q.x, q.z, rm.map) ? 8 : 0)
+        - (q.king ? 10 : 0) - (rm.flags && rm.flags[p.team]?.carrier === q.id ? 12 : 0); // 왕과 우리 깃발을 든 적을 우선
       if (sc < bs) { bs = sc; best = q; }
     }
     if (best !== tg) a.actAt = Math.max(a.actAt, t + L.react * 1000 * rnd(0.8, 1.3)); // 새 목표를 보고 반응하는 시간
@@ -629,7 +1044,10 @@ function botThink(rm, p, dt, t) {
 
   // 조준 (회전 속도와 오차는 난이도에 따라)
   if (t >= a.errAt) { a.errYaw = rnd(-L.err, L.err); a.errPitch = rnd(-L.err, L.err) * 0.5; a.errAt = t + rnd(400, 900); }
-  const want = Math.atan2(-dx, -dz) + a.errYaw;
+  const goal = botGoal(rm, p);
+  const useGoal = !!goal && (goal.priority || d > 12 || !los);
+  const ax = useGoal ? goal.x - p.x : dx, az = useGoal ? goal.z - p.z : dz;
+  const want = Math.atan2(-ax, -az) + a.errYaw;
   const diff = wrapAngle(want - p.yaw);
   p.yaw += clamp(diff, -L.turn * dt, L.turn * dt);
   const aimDiff = Math.abs(wrapAngle(Math.atan2(-dx, -dz) - p.yaw));
@@ -663,7 +1081,7 @@ function botThink(rm, p, dt, t) {
   const prefer = c.ranged ? Math.max(6, c.reach * 0.55) : c.reach * 0.8;
   let mx = 0, mz = 0;
   const sdef = SKILLS[c.skill];
-  const support = rm.mode === 'tdm' && sdef && (sdef.heal || (sdef.dur && sdef.radius));
+  const support = rm.teamMode && sdef && (sdef.heal || (sdef.dur && sdef.radius));
   let buddy = null;
   if (support) { // 지원 직업: 가장 가까운(다친 쪽 우선) 아군 곁에 머무름
     let bs = Infinity;
@@ -673,7 +1091,10 @@ function botThink(rm, p, dt, t) {
       if (sc < bs) { bs = sc; buddy = q; }
     }
   }
-  if (buddy && Math.hypot(buddy.x - p.x, buddy.z - p.z) > 6 && d > prefer * 1.2) {
+  if (useGoal) {
+    const gl = Math.hypot(ax, az);
+    if (gl > 1.4) { mx = ax / gl; mz = az / gl; }
+  } else if (buddy && Math.hypot(buddy.x - p.x, buddy.z - p.z) > 6 && d > prefer * 1.2) {
     const bx = buddy.x - p.x, bz = buddy.z - p.z, bl = Math.hypot(bx, bz) || 1;
     mx = bx / bl; mz = bz / bl;
   } else if (d > prefer * (c.ranged ? 1.35 : 1) || !los) { mx = ux; mz = uz; }
@@ -711,7 +1132,7 @@ function sanitizeCreate(cr) {
   return { name, mode, mapId, max, password, practice, bots, botDiff };
 }
 
-function joinRoom(ws, user, m) {
+function joinRoom(ws, user, m, prog) {
   let room;
   if (m.create) {
     if (rooms.size >= ROOM.maxRooms) return send(ws, { t: 'error', code: 'toomanyrooms' });
@@ -744,18 +1165,20 @@ function joinRoom(ws, user, m) {
     id, ws, room, name, cls, team: room.assignTeam(), userId: user?.id || null, x: 0, y: 0, z: 0, yaw: 0, pitch: 0,
     hp: CLASSES[cls].hp, alive: true, blocking: false, blockSince: 0, kills: 0, deaths: 0, lastAttack: 0,
     lastState: now(), lastChat: 0, lastEmote: 0, stunUntil: 0, buffUntil: 0, buffDmg: 1, buffSpeed: 1,
-    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), nextCls: null, dmgLog: new Map(),
+    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), nextCls: null, dmgLog: new Map(), prog: prog || null, matchStart: now(), streak: 0,
   };
   Object.assign(p, room.spawnFor(p));
+  if (room.mode === 'survival' && room.round?.active) p.alive = false; // 생존전 도중에 들어오면 다음 라운드부터
   room.players.set(id, p);
   ws.pid = id;
   ws.room = room;
   if (room.custom && room.hostId == null) room.hostId = id; // 방을 만든 사람이 방장
   room.syncBots();
   send(ws, {
-    t: 'welcome', id, cls, team: p.team, x: p.x, y: p.y, z: p.z, yaw: p.yaw, hp: p.hp,
-    roster: room.roster(), authed: !!user, db: dbEnabled, room: room.info(), map: room.mapId,
+    t: 'welcome', id, cls, team: p.team, x: p.x, y: p.y, z: p.z, yaw: p.yaw, hp: p.hp, alive: p.alive,
+    roster: room.roster(), authed: !!user, prog: !!prog, db: dbEnabled, room: room.info(), map: room.mapId,
   });
+  sendProfile(p);
   room.broadcast({ t: 'roster', list: room.roster() });
   room.broadcast(room.matchState());
   if (room.vote && !room.vote.done) send(ws, { t: 'votestart', modes: MODES, maps: MATCH.votableMaps, ms: Math.max(0, room.vote.endsAt - now()), mode: room.mode, map: room.mapId });
@@ -780,11 +1203,26 @@ wss.on('connection', (ws) => {
       if (ws.pid || ws.joining) return;
       ws.joining = true;
       const user = await verifyUser(m.token);
+      const prog = user ? await acquireProg(ws, user.id) : null;
       ws.joining = false;
       if (ws.readyState !== 1 || ws.pid) return;
       if (REQUIRE_LOGIN && !user) return send(ws, { t: 'authrequired' });
-      return joinRoom(ws, user, m);
+      return joinRoom(ws, user, m, prog);
     }
+
+    // 로비에서도 쓰는 성장 메시지 (방에 들어가기 전에도 프로필/상점 사용 가능)
+    if (m.t === 'getprofile') {
+      if (ws.profPending) return;
+      ws.profPending = true;
+      const user = await verifyUser(m.token);
+      ws.profPending = false;
+      if (!user) { releaseProg(ws); return send(ws, { t: 'profile', guest: true }); }
+      const prog = await acquireProg(ws, user.id);
+      return send(ws, prog ? profileOf(prog) : { t: 'profile', guest: true, off: true });
+    }
+    if (m.t === 'gacha') return handleGacha(ws, Number(m.n));
+    if (m.t === 'equip') return handleEquip(ws, m);
+    if (m.t === 'settitle') return handleTitle(ws, m.id == null ? null : String(m.id));
 
     const rm = ws.room;
     const p = rm?.players.get(ws.pid);
@@ -826,7 +1264,7 @@ wss.on('connection', (ws) => {
       const text = String(m.text ?? '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, CHAT.maxLen);
       if (!text) return;
       p.lastChat = t;
-      const teamOnly = !!m.team && rm.mode === 'tdm';
+      const teamOnly = !!m.team && rm.teamMode;
       const msg = { t: 'chat', id: p.id, name: p.name, team: p.team, text, teamOnly };
       for (const q of rm.players.values()) if (!teamOnly || q.team === p.team) send(q.ws, msg);
     } else if (m.t === 'emote') {
@@ -858,8 +1296,12 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     const rm = ws.room;
     const p = rm?.players.get(ws.pid);
-    if (!p) return;
+    if (!p) { releaseProg(ws); return; }
+    if (rm.flags) rm.dropFlagOf(p);
+    if (rm.mode === 'king' && p.king && rm.round?.active) rm.endRound(3 - p.team);
     rm.players.delete(p.id);
+    if (p.userId && p.prog) flushProg(p.userId); // 나가면 진행도 저장
+    releaseProg(ws);
     if (rm.vote) rm.vote.votes.delete(p.id);
     rm.refreshHost();
     if (rm.humans) rm.syncBots();
@@ -891,7 +1333,11 @@ setInterval(() => { // 0.25초마다 시간 종료 확인, 5초마다 남은 시
   tickCount++;
   for (const rm of rooms.values()) {
     if (rm.over) continue;
-    if (!rm.humans) { rm.endsAt = now() + MATCH.durationMs; continue; } // 빈 방은 시간이 흐르지 않음
+    if (!rm.humans) { // 빈 방은 시간이 흐르지 않음
+      rm.endsAt = now() + MATCH.durationMs;
+      if (rm.round?.active) rm.round.endsAt = now() + MODE_RULES[rm.mode].roundMs;
+      continue;
+    }
     if (now() >= rm.endsAt) rm.timeUp();
     else if (tickCount % 20 === 0) rm.broadcast(rm.matchState());
   }
@@ -904,6 +1350,13 @@ setInterval(() => {
     ws.ping();
   }
 }, 15000);
+
+/* ───────────── 공개 방 생성 (모든 메서드가 정의된 뒤에) ───────────── */
+globalThis.__rooms = rooms; // (테스트용)
+for (let i = 1; i <= PUBLIC_ROOMS; i++) {
+  const r = new Room({ name: `Arena ${i}`, custom: false, max: MAX_PLAYERS, mode: DEFAULT_MODE, mapId: 'town' });
+  rooms.set(r.id, r);
+}
 
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log('\n⚔  IRON OATH 서버가 열렸습니다!');

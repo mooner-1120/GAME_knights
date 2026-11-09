@@ -255,3 +255,119 @@ export function projBlocked(ax, ay, az, bx, by, bz, map = ARENA) {
   }
   return false;
 }
+
+/* ═════════ 성장 시스템 (서버·클라이언트 공용) ═════════ */
+// 레벨: n레벨이 되려면 누적 30·n·(n-1) 경험치 (2→60, 3→180, 4→360 …)
+export const MAX_LEVEL = 50;
+export const xpForLevel = (n) => 30 * n * (n - 1);
+export function levelFor(xp) {
+  let lv = 1;
+  while (lv < MAX_LEVEL && xp >= xpForLevel(lv + 1)) lv++;
+  return lv;
+}
+// 한 판 보상 (AI가 섞인 방은 botFactor 배로 줄여서 연습으로 파밍하는 것을 막음)
+export const REWARD = {
+  xpBase: 30, xpKill: 8, xpWin: 50, xpDraw: 20,
+  coinBase: 10, coinKill: 4, coinWin: 25, coinDraw: 10,
+  levelUpCoins: 25, botFactor: 0.3, minPlayMs: 45000,
+};
+
+// 업적: c = 카운터 이름, goal = 목표, coins = 보상 코인, title = 달성 시 칭호 해금
+export const ACH = [
+  { id: 'first_blood', c: 'kills', goal: 1, coins: 30 },
+  { id: 'slayer', c: 'kills', goal: 100, coins: 150, title: true },
+  { id: 'reaper', c: 'kills', goal: 500, coins: 400, title: true },
+  { id: 'parry', c: 'parries', goal: 50, coins: 150, title: true },
+  { id: 'slider', c: 'slidekills', goal: 5, coins: 100, title: true },
+  { id: 'shadow', c: 'backstabs', goal: 20, coins: 120, title: true },
+  { id: 'counter', c: 'counterkills', goal: 20, coins: 120, title: true },
+  { id: 'eagle', c: 'longshots', goal: 10, coins: 150, title: true },
+  { id: 'rampage', c: 'maxstreak', goal: 5, coins: 100, title: true },
+  { id: 'winner', c: 'wins', goal: 1, coins: 50 },
+  { id: 'champion', c: 'wins', goal: 10, coins: 300, title: true },
+  { id: 'veteran', c: 'matches', goal: 50, coins: 200, title: true },
+  { id: 'healer', c: 'heals', goal: 1000, coins: 150, title: true },
+  { id: 'bully', c: 'kicks', goal: 50, coins: 100, title: true },
+  { id: 'allround', c: 'classes', goal: 10, coins: 300, title: true },
+  { id: 'flagger', c: 'caps', goal: 5, coins: 150, title: true },
+  { id: 'holder', c: 'ptscore', goal: 50, coins: 150, title: true },
+  { id: 'kingslayer', c: 'kingkills', goal: 5, coins: 150, title: true },
+  { id: 'survivor', c: 'roundwins', goal: 10, coins: 200, title: true },
+];
+
+// 꾸미기 아이템 (슬롯: cape 망토 / hat 모자). 뽑기로만 얻음
+export const RARITY = { common: { w: 60, refund: 20 }, rare: { w: 28, refund: 40 }, epic: { w: 10, refund: 100 }, legendary: { w: 2, refund: 300 } };
+export const ITEMS = [
+  { id: 'cape_red', slot: 'cape', rar: 'common', color: 0xa02828 },
+  { id: 'cape_blue', slot: 'cape', rar: 'common', color: 0x2a56a8 },
+  { id: 'cape_green', slot: 'cape', rar: 'common', color: 0x2f7a3a },
+  { id: 'cape_black', slot: 'cape', rar: 'common', color: 0x1c1c22 },
+  { id: 'cape_purple', slot: 'cape', rar: 'rare', color: 0x7a3aa8 },
+  { id: 'cape_white', slot: 'cape', rar: 'rare', color: 0xe8e8ee },
+  { id: 'cape_gold', slot: 'cape', rar: 'epic', color: 0xd8a82a, glow: 0x6a4a00 },
+  { id: 'cape_flame', slot: 'cape', rar: 'legendary', color: 0xff6a1a, glow: 0xff3a00 },
+  { id: 'hat_plume_red', slot: 'hat', rar: 'common', kind: 'plume', color: 0xc02a2a },
+  { id: 'hat_plume_blue', slot: 'hat', rar: 'common', kind: 'plume', color: 0x2a5ac0 },
+  { id: 'hat_horns', slot: 'hat', rar: 'rare', kind: 'horns', color: 0xe8dcc0 },
+  { id: 'hat_crest', slot: 'hat', rar: 'rare', kind: 'crest', color: 0xc02a2a },
+  { id: 'hat_wizard', slot: 'hat', rar: 'rare', kind: 'wizard', color: 0x3a3a9a },
+  { id: 'hat_crown', slot: 'hat', rar: 'epic', kind: 'crown', color: 0xe6b422, glow: 0x6a4a00 },
+  { id: 'hat_halo', slot: 'hat', rar: 'epic', kind: 'halo', color: 0xfff2a0, glow: 0xffe060 },
+  { id: 'hat_dragon', slot: 'hat', rar: 'legendary', kind: 'dragon', color: 0xff5a1a, glow: 0xff3a00 },
+];
+export const ITEM_BY_ID = Object.fromEntries(ITEMS.map((i) => [i.id, i]));
+// 뽑기: 코인으로만 (현금 결제 없음). pityAt번째 뽑기까지 에픽 이상이 안 나오면 확정
+export const GACHA = { cost1: 100, cost10: 900, pityAt: 30 };
+export function gachaOdds() {
+  const tot = Object.values(RARITY).reduce((a, r) => a + r.w, 0);
+  return Object.fromEntries(Object.entries(RARITY).map(([k, r]) => [k, +((r.w / tot) * 100).toFixed(1)]));
+}
+
+/* ═════════ 게임 모드 / 맵 목표물 (서버·클라이언트 공용) ═════════
+   ffa 개인전 · tdm 팀 데스매치 · ctf 깃발 뺏기 · points 거점 점령 · survival 생존전(라운드) · king 왕 지키기(라운드) */
+export const MODE_LIST = ['ffa', 'tdm', 'ctf', 'points', 'survival', 'king'];
+export const isTeamMode = (m) => m !== 'ffa';
+export const MODE_RULES = {
+  ctf: { caps: 3, returnMs: 15000, grab: 1.7 },
+  points: { score: 100, radius: 4.2, rate: 24 },           // 거점 안 1명당 초당 24 (최대 3명), 100이면 점령
+  survival: { rounds: 3, roundMs: 60000, pauseMs: 4000 },
+  king: { rounds: 3, roundMs: 75000, pauseMs: 4000, dmgTaken: 0.7 },
+};
+// 맵 곳곳에 놓이는 아이템. 먹으면 사라지고 respawnMs 뒤에 다시 생김
+export const ITEM_KINDS = {
+  health: { heal: 45, color: 0xe23b3b },
+  speed: { ms: 8000, mult: 1.35, color: 0x3be2d2 },
+  rage: { ms: 8000, mult: 1.3, color: 0xe2a13b },
+};
+export const ITEM_RESPAWN_MS = 25000;
+export const ITEM_PICKUP_R = 1.3;
+
+function freeSpot(map, x, z, r) {
+  const ok = (px, pz) => { const [rx, rz] = resolveCollision(px, pz, r, map); return Math.hypot(rx - px, rz - pz) < 0.01; };
+  if (ok(x, z)) return { x: +x.toFixed(2), z: +z.toFixed(2) };
+  for (let rad = 1; rad <= 26; rad++) {
+    for (let k = 0; k < 16; k++) {
+      const a = (k / 16) * Math.PI * 2, px = x + Math.cos(a) * rad, pz = z + Math.sin(a) * rad;
+      if (Math.abs(px) < map.half - 3 && Math.abs(pz) < map.half - 3 && ok(px, pz)) return { x: +px.toFixed(2), z: +pz.toFixed(2) };
+    }
+  }
+  return { x, z };
+}
+// 가운데 거점: 두 팀에게 똑같이 공평하도록 중앙선(z축) 위에서만 비켜 놓음
+function centerSpot(map, r) {
+  const ok = (px, pz) => { const [rx, rz] = resolveCollision(px, pz, r, map); return Math.hypot(rx - px, rz - pz) < 0.01; };
+  for (let k = 0; k <= 24; k += 0.5) if (ok(0, k)) return { x: 0, z: k };
+  return { x: 0, z: 0 };
+}
+for (const m of Object.values(MAPS)) {
+  const h = m.half, fx = h - 9, c0 = centerSpot(m, 3.4), pd = Math.min(h - 6, Math.max(Math.round(h * 0.36), Math.ceil(c0.z) + 10)); // 가운데 거점과 너무 가깝지 않게
+  m.obj = {
+    flags: { 1: freeSpot(m, -fx, 0, 2.2), 2: freeSpot(m, fx, 0, 2.2) },
+    points: [c0, freeSpot(m, 0, pd, 3.4), freeSpot(m, 0, -pd, 3.4)],
+    items: [
+      { kind: 'health', ...freeSpot(m, -h * 0.5, 0, 1.6) }, { kind: 'health', ...freeSpot(m, h * 0.5, 0, 1.6) },
+      { kind: 'speed', ...freeSpot(m, 0, h * 0.55, 1.6) }, { kind: 'speed', ...freeSpot(m, 0, -h * 0.55, 1.6) },
+      { kind: 'rage', ...freeSpot(m, -h * 0.25, h * 0.25, 1.6) }, { kind: 'rage', ...freeSpot(m, h * 0.25, -h * 0.25, 1.6) },
+    ],
+  };
+}

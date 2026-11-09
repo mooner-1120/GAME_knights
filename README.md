@@ -16,7 +16,7 @@ npm install
 npm start          # http://localhost:3000
 MODE=tdm npm start # 팀전으로 시작 (게임 중 방장이 Esc 메뉴에서 바꿀 수도 있음)
 ```
-환경변수: `PORT`, `MAX_PLAYERS`(기본 16), `MODE`(ffa|tdm), `REQUIRE_LOGIN=1`(로그인 필수)
+환경변수: `PORT`, `MAX_PLAYERS`(기본 16), `MODE`(ffa|tdm|ctf|points|survival|king), `MIN_PLAY_MS`(보상·기록 최소 플레이 시간, 기본 45000), `REQUIRE_LOGIN=1`(로그인 필수)
 
 ## Render 배포
 GitHub에 올린 뒤 Render → New Web Service → Build `npm install` / Start `npm start` / Free.
@@ -34,6 +34,20 @@ GitHub에 올린 뒤 Render → New Web Service → Build `npm install` / Start 
 - 방 만들기에서 AI 수와 난이도를 정하면 빈자리를 AI("Knight")가 채웁니다. 방장은 Esc 메뉴에서 AI 추가/삭제와 난이도 변경이 가능합니다.
 - 사람이 들어오면 AI가 자리를 양보하고, 사람이 나가면 다시 채워집니다. AI가 섞인 판은 DB 전적에 기록되지 않습니다.
 - 난이도 5단계: 신병 / 병사 / 베테랑 / 정예 / 달인 (반응속도, 조준 오차, 이동 속도, 방어·패링 확률, 스킬 사용 빈도가 달라짐). 설정은 server.js의 `AI_LEVELS`.
+
+## 진행도 / 상점 (Supabase 추가 설정)
+레벨·경험치, 직업별 전적, 칭호·업적(19종), 코인, 외형(망토·모자) 뽑기가 들어 있습니다. **로그인한 유저만** 저장됩니다.
+1. Supabase SQL Editor에서 `supabase/schema.sql` 실행 후 **`supabase/progression.sql` 도 한 번 실행**합니다.
+2. 서버는 `SUPABASE_SERVICE_ROLE_KEY`(서버 전용)로 저장합니다. 안 돌리면 진행도 저장만 꺼지고 게임은 정상 동작합니다.
+- 뽑기는 게임으로 번 코인만 사용(현금 결제 없음), 확률은 상점에 표시, 30회 천장, 중복은 코인으로 환급됩니다.
+- AI가 섞인 방은 보상이 0.3배이며 업적 카운트·직업 전적·랭킹에는 반영되지 않습니다.
+
+## 게임 모드
+개인전 · 팀전 · **깃발 뺏기**(3회 점령) · **거점 점령**(3거점 점수) · **생존전**(리스폰 없는 라운드제) · **왕 지키기**(팀별 왕 1명, 왕이 죽으면 라운드 패배).
+맵에는 체력/속도/분노 아이템이 놓이고 25초마다 다시 나타납니다. 친구 초대 링크는 방장 Esc 메뉴의 초대 버튼으로 복사합니다.
+
+## 아직 안 들어간 것
+문·부술 수 있는 장애물·고지대 같은 환경 요소는 이번에 구현하지 않았습니다.
 
 ## 조작법
 WASD 이동 · Shift 달리기 · 좌클릭 공격 · 우클릭/F 방어(맞기 직전에 누르면 **패링** → 반격) · Q 직업 스킬 · E 발차기(쿨타임 없음)
