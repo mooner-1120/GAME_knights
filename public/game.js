@@ -1485,7 +1485,7 @@ function handle(m) {
       ws = null;
       break;
     case 'match':
-      matchInfo = { mode: m.mode, limit: m.limit, teamScore: m.teamScore, over: m.over, hostId: m.hostId, map: m.map, custom: m.custom, room: m.room, remainMs: m.remainMs, at: performance.now() };
+      matchInfo = { mode: m.mode, limit: m.limit, teamScore: m.teamScore, over: m.over, hostId: m.hostId, map: m.map, custom: m.custom, room: m.room, remainMs: m.remainMs, bots: m.bots || 0, botTarget: m.botTarget || 0, botDiff: m.botDiff || 3, practice: !!m.practice, at: performance.now() };
       applyMap(m.map);
       if (!m.over) { vote = null; clearInterval(endTimer); $('x-end').style.display = 'none'; }
       updateMatchHud();
@@ -2025,11 +2025,18 @@ function updateModeBtn() {
   const host = joined && me.id != null && matchInfo.hostId === me.id;
   b.style.display = host ? '' : 'none';
   mb.style.display = host ? '' : 'none';
+  for (const id of ['m-botadd', 'm-botsub', 'm-diff']) $(id).style.display = host ? '' : 'none';
   if (host) {
     b.textContent = `${t('host_mode')} → ${t(matchInfo.mode === 'tdm' ? 'mode_ffa' : 'mode_tdm')}`;
+    $('m-botadd').textContent = `${t('host_botadd')} · ${matchInfo.botTarget || 0}`;
+    $('m-botsub').textContent = `${t('host_botsub')}`;
+    $('m-diff').textContent = `${t('host_diff')} → ${t('ai_lv' + (((matchInfo.botDiff || 3) % 5) + 1))}`;
     mb.textContent = `${t('host_map')} → ${t('map_' + MAP_IDS[(MAP_IDS.indexOf(matchInfo.map) + 1) % MAP_IDS.length])}`;
   }
 }
+$('m-botadd').onclick = () => send({ t: 'setbots', count: (matchInfo.botTarget || 0) + 1 });
+$('m-botsub').onclick = () => send({ t: 'setbots', count: Math.max(0, (matchInfo.botTarget || 0) - 1) });
+$('m-diff').onclick = () => send({ t: 'setbots', diff: ((matchInfo.botDiff || 3) % 5) + 1 });
 $('m-map').onclick = () => send({ t: 'setroom', map: MAP_IDS[(MAP_IDS.indexOf(matchInfo.map) + 1) % MAP_IDS.length] });
 setInterval(updateMatchHud, 500);
 setInterval(updateModeBtn, 500);
@@ -2038,6 +2045,16 @@ $('m-mode').onclick = () => send({ t: 'setmode', mode: matchInfo.mode === 'tdm' 
 function fillRoomForm() {
   $('rc-mode').innerHTML = ['ffa', 'tdm'].map((x) => `<option value="${x}">${esc(t('mode_' + x))}</option>`).join('');
   $('rc-map').innerHTML = MAP_IDS.map((x) => `<option value="${x}">${esc(t('map_' + x))}</option>`).join('');
+  const lvOpts = (sel) => [1, 2, 3, 4, 5].map((n) => `<option value="${n}"${n === (sel || 3) ? ' selected' : ''}>${esc(t('ai_lv' + n))}</option>`).join('');
+  const cnt = (list, sel, label) => list.map((n) => `<option value="${n}"${n === sel ? ' selected' : ''}>${esc(label)}: ${n}</option>`).join('');
+  const prev = { pb: $('pr-bots').value, pd: $('pr-diff').value, pm: $('pr-mode').value, pp: $('pr-map').value, rb: $('rc-bots').value, rd: $('rc-diff').value };
+  $('pr-bots').innerHTML = cnt([1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15], 5, t('ai_count'));
+  $('pr-diff').innerHTML = lvOpts(3);
+  $('pr-mode').innerHTML = ['ffa', 'tdm'].map((x) => `<option value="${x}">${esc(t('mode_' + x))}</option>`).join('');
+  $('pr-map').innerHTML = MAP_IDS.map((x) => `<option value="${x}">${esc(t('map_' + x))}</option>`).join('');
+  $('rc-bots').innerHTML = cnt([0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15], 0, t('ai_count'));
+  $('rc-diff').innerHTML = lvOpts(3);
+  if (prev.pb) { $('pr-bots').value = prev.pb; $('pr-diff').value = prev.pd; $('pr-mode').value = prev.pm; $('pr-map').value = prev.pp; $('rc-bots').value = prev.rb; $('rc-diff').value = prev.rd; }
   $('rc-max').innerHTML = [2, 4, 6, 8, 10, 12, 16].map((n) => `<option value="${n}"${n === 8 ? ' selected' : ''}>${esc(t('room_max'))}: ${n}</option>`).join('');
 }
 async function refreshRooms() {
@@ -2053,12 +2070,12 @@ async function refreshRooms() {
     nm.className = 'nm';
     nm.textContent = `${r.locked ? '🔒 ' : ''}${r.name}`;
     const sm = document.createElement('small');
-    sm.textContent = `${t(r.custom ? 'room_host' : 'room_public')} · ${t('mode_' + r.mode)} · ${t('map_' + r.map)} · ${r.count}/${r.max}`;
+    sm.textContent = `${t(r.custom ? 'room_host' : 'room_public')} · ${t('mode_' + r.mode)} · ${t('map_' + r.map)} · ${r.count}/${r.max}${r.bots ? ` · AI ${r.bots} (${t('ai_lv' + r.botDiff)})` : ''}`;
     nm.appendChild(sm);
     const btn = document.createElement('button');
     btn.className = 'btn2';
     btn.textContent = t('room_join');
-    btn.disabled = r.count >= r.max;
+    btn.disabled = r.count >= r.max;  // AI는 사람이 들어오면 자리를 양보하므로 사람 수만 셈
     btn.onclick = () => {
       let password = '';
       if (r.locked) { password = window.prompt(t('room_pw_prompt')) ?? null; if (password === null) return; }
@@ -2070,8 +2087,12 @@ async function refreshRooms() {
   }
 }
 $('room-refresh').onclick = refreshRooms;
+$('practice').onclick = () => {
+  pendingJoin = { create: { practice: true, name: 'Practice', mode: $('pr-mode').value, map: $('pr-map').value, bots: Number($('pr-bots').value), botDiff: Number($('pr-diff').value) } };
+  $('join').click();
+};
 $('rc-go').onclick = () => {
-  pendingJoin = { create: { name: $('rc-name').value, password: $('rc-pass').value, mode: $('rc-mode').value, map: $('rc-map').value, max: Number($('rc-max').value) } };
+  pendingJoin = { create: { name: $('rc-name').value, password: $('rc-pass').value, mode: $('rc-mode').value, map: $('rc-map').value, max: Number($('rc-max').value), bots: Number($('rc-bots').value), botDiff: Number($('rc-diff').value) } };
   $('join').click();
 };
 document.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { if (b.dataset.tab === 'rooms') refreshRooms(); }));

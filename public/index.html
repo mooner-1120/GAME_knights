@@ -246,6 +246,9 @@
         <button class="btn2" data-view="chars" data-i18n="chooseClass"></button>
         <button class="btn2" id="m-mode" style="display:none"></button>
         <button class="btn2" id="m-map" style="display:none"></button>
+        <button class="btn2" id="m-botadd" style="display:none"></button>
+        <button class="btn2" id="m-botsub" style="display:none"></button>
+        <button class="btn2" id="m-diff" style="display:none"></button>
         <button class="btn2" data-view="settings" data-i18n="settings"></button>
         <button class="btn2" data-view="help" data-i18n="controls"></button>
         <button class="btn2 danger" id="m-home" data-i18n="home"></button>
@@ -323,6 +326,11 @@
         <div class="row" style="margin-top:18px">
           <button class="btn" id="join" data-i18n="play"></button>
         </div>
+        <div class="row" style="margin-top:12px">
+          <select id="pr-bots"></select><select id="pr-diff"></select><select id="pr-mode"></select><select id="pr-map"></select>
+          <button class="btn2" id="practice" data-i18n="practice"></button>
+        </div>
+        <p class="note" data-i18n="practice_note"></p>
         <p id="lobmsg"></p>
         <p class="note" data-i18n="mode_note"></p>
         <p class="note" data-i18n="tip"></p>
@@ -341,7 +349,7 @@
           <input class="inp" id="rc-pass" maxlength="16" data-i18n-ph="room_pass">
         </div>
         <div class="row" style="margin-top:10px">
-          <select id="rc-mode"></select><select id="rc-map"></select><select id="rc-max"></select>
+          <select id="rc-mode"></select><select id="rc-map"></select><select id="rc-max"></select><select id="rc-bots"></select><select id="rc-diff"></select>
           <button class="btn" id="rc-go" data-i18n="room_create"></button>
         </div>
         <p class="note" data-i18n="room_hostnote"></p>
