@@ -2,7 +2,7 @@
 // 구성: 설정 → 렌더러/월드 → 블록형 기사 모델·애니메이션 → 1인칭 → 사운드 → 네트워크 → 메뉴/HUD → 입력 → 메인 루프
 
 import * as THREE from 'three';
-import { CLASSES, SKILLS, ARENA, PLAYER, TEAMS, EMOTES, MAPS, PROJ, resolveCollision, lineBlocked, projBlocked, useMap, ACH, ITEMS, ITEM_BY_ID, RARITY, GACHA, gachaOdds, SKIN_THEMES, MODE_LIST, isTeamMode, MODE_RULES, ITEM_KINDS } from '/classes.js';
+import { CLASSES, SKILLS, ARENA, PLAYER, TEAMS, EMOTES, MAPS, PROJ, resolveCollision, lineBlocked, projBlocked, useMap, ACH, ITEMS, ITEM_BY_ID, RARITY, GACHA, gachaOdds, SKIN_THEMES, MODE_LIST, DUEL, isTeamMode, MODE_RULES, ITEM_KINDS } from '/classes.js';
 import { t, cname, cdesc, crole, sname, sdesc, setLang, getLang, onLang, applyI18n, LANGS } from './i18n.js';
 
 const $ = (id) => document.getElementById(id);
@@ -1648,6 +1648,19 @@ function handle(m) {
       if (matchInfo.obj?.items) matchInfo.obj.items[m.i] = m.active ? 1 : 0;
       if (!m.active) { const it = MAPS[currentMap]?.obj?.items?.[m.i]; if (it) { burst(it.x, 1, it.z, ITEM_KINDS[it.kind].color, 10); ring(it.x, it.z, ITEM_KINDS[it.kind].color, 2.2, 0.5); } if (m.by === me.id) toast(t('item_' + m.kind)); }
       break;
+    case 'duel':
+      if (m.ev === 'clear') {
+        banner(m.last ? t('duel_all', { n: m.stages }) : t('duel_clear', { s: m.stage }));
+        if (matchInfo.obj?.duel && !m.last) matchInfo.obj.duel.pause = true;
+      } else if (m.ev === 'start') {
+        if (matchInfo.obj?.duel) { matchInfo.obj.duel.stage = m.stage; matchInfo.obj.duel.pause = false; }
+        banner(t('duel_start', { s: m.stage, n: m.stages }));
+      } else if (m.ev === 'fail') banner(t('duel_fail', { s: m.stage }));
+      updateMatchHud();
+      break;
+    case 'duelreward':
+      toast(t(m.first ? 'duel_reward' : 'duel_reward_again', { c: m.coins, x: m.xp }));
+      break;
     case 'roundstart':
       if (matchInfo.obj) matchInfo.obj.kings = m.kings;
       kingIds = m.kings || [null, null];
@@ -2219,6 +2232,10 @@ function updateMatchHud() {
     else if (md === 'survival') extra = t('m_survival', { n: matchInfo.limit, r: o.round?.n || 0 }) + (o.round ? ` · ${o.round.alive[0]} vs ${o.round.alive[1]}` : '');
     else if (md === 'king') extra = t('m_king', { n: matchInfo.limit, r: o.round?.n || 0 });
     el.innerHTML = tm + `<span style="color:${TEAM_CSS[1]}">${esc(t('team_1'))} ${matchInfo.teamScore[1]}</span> <b>:</b> <span style="color:${TEAM_CSS[2]}">${matchInfo.teamScore[2]} ${esc(t('team_2'))}</span><small>${mine}${esc(extra)}</small>`;
+  } else if (md === 'duel') {
+    const d = o.duel || { stage: 1, stages: 5 };
+    const pips = Array.from({ length: d.stages }, (_, i) => (i + 1 < d.stage ? '✔' : i + 1 === d.stage ? '⚔' : '·')).join(' ');
+    el.innerHTML = tm + `${esc(t('m_duel', { s: d.stage, n: d.stages }))}<small>${pips}${d.pause ? ' · ' + esc(t('duel_next')) : ''}</small>`;
   } else {
     const top = [...roster].sort((a, b) => b.kills - a.kills)[0];
     el.innerHTML = tm + `${esc(t('m_ffa', { n: matchInfo.limit }))}<small>${top ? esc(t('m_lead', { n: top.name, k: top.kills })) : ''}</small>`;
@@ -2496,7 +2513,20 @@ function fillRoomForm() {
   $('rc-diff').innerHTML = lvOpts(3);
   if (prev.pb) { $('pr-bots').value = prev.pb; $('pr-diff').value = prev.pd; $('pr-mode').value = prev.pm; $('pr-map').value = prev.pp; $('rc-bots').value = prev.rb; $('rc-diff').value = prev.rd; }
   $('rc-max').innerHTML = [2, 4, 6, 8, 10, 12, 16].map((n) => `<option value="${n}"${n === 8 ? ' selected' : ''}>${esc(t('room_max'))}: ${n}</option>`).join('');
+  duelFormSync();
 }
+// 결투는 1:1 전용: 모드를 고르면 결투장 맵으로 맞추고, AI 수 선택은 감춥니다 (난이도 = 시작 단계)
+function duelFormSync() {
+  for (const [mode, map, bots, diff, note] of [['pr-mode', 'pr-map', 'pr-bots', 'pr-diff', 'pr-note'], ['rc-mode', 'rc-map', 'rc-bots', 'rc-diff', 'rc-note']]) {
+    const on = $(mode).value === 'duel';
+    if (on && $(map).value !== 'duel') $(map).value = 'duel';
+    $(bots).style.display = on ? 'none' : '';
+    $(diff).title = on ? t('duel_stage_hint') : '';
+    const n = $(note);
+    if (n) { n.textContent = on ? t('duel_hint') : ''; n.style.display = on ? '' : 'none'; }
+  }
+}
+for (const id of ['pr-mode', 'rc-mode']) $(id).addEventListener('change', duelFormSync);
 async function refreshRooms() {
   let data;
   try { data = await (await fetch('/rooms.json', { cache: 'no-store' })).json(); } catch { return; }
