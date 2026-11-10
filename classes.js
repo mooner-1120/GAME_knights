@@ -60,7 +60,18 @@ function makeColosseum() { // 투기장: 작고 가까운 전투. 가운데 단�
   return { id: 'colosseum', name: '투기장', half: 36, theme: 'colosseum', boxes, pillars, spawns: sp(32, [-8, -4, 0, 4, 8]) };
 }
 
-export const MAPS = { town: makeTown(), fortress: makeFortress(), forest: makeForest(), colosseum: makeColosseum() };
+function makeDuel() { // 결투장: 1:1 전용. 양 끝에서 멀리 떨어져 시작하고 가운데에 가벼운 엄폐물만 둡니다.
+  const pillars = [{ x: 0, z: 0, r: 2.2, kind: 'dais' }], boxes = [];
+  for (const sx of [-1, 1]) {
+    boxes.push({ x: sx * 8, z: 0, w: 2.5, d: 6, h: 3, style: 'stone' });
+    pillars.push({ x: sx * 5, z: 10, r: 1.1, kind: 'column' }, { x: sx * 5, z: -10, r: 1.1, kind: 'column' },
+      { x: sx * 15, z: 12, r: 1.0, kind: 'barrel' }, { x: sx * 15, z: -12, r: 1.0, kind: 'barrel' });
+  }
+  return { id: 'duel', name: '결투장', half: 22, theme: 'colosseum', duelMap: true, boxes, pillars,
+    spawns: [{ x: -18, z: 0, team: 1 }, { x: 18, z: 0, team: 2 }] };
+}
+
+export const MAPS = { town: makeTown(), fortress: makeFortress(), forest: makeForest(), colosseum: makeColosseum(), duel: makeDuel() };
 // 클라이언트가 쓰는 "현재 맵". useMap(id)으로 같은 객체의 내용을 교체합니다. (서버는 방마다 맵을 따로 들고 있어서 이 객체를 쓰지 않습니다)
 export const ARENA = { ...MAPS.town };
 export function useMap(id) { Object.assign(ARENA, MAPS[id] || MAPS.town); }
@@ -85,6 +96,8 @@ export const PLAYER = {
   maxNameLen: 16,
   sprintMult: 1.55,
   classSwapGraceMs: 8000,
+  safeSpawn: 30,            // 되살아날 때 적과 최소 이만큼 떨어진 지점을 고릅니다
+  spawnGuardMs: 1500,       // 되살아난 직후 이 시간 동안은 피해를 받지 않습니다
   // 패링/반격: 방어를 누른 직후 parryMs 안에 맞으면 피해 0 + 공격자 기절 → counterWindowMs 동안 반격 강화
   parryMs: 300,
   parryStunMs: 900,
@@ -273,6 +286,12 @@ export const REWARD = {
 };
 
 // 업적: c = 카운터 이름, goal = 목표, coins = 보상 코인, title = 달성 시 칭호 해금
+// 단계별 1:1 결투 보상. 처음 깬 단계는 전액, 다시 깨면 repeat 배율만큼 받습니다 (반복 파밍 방지)
+export const DUEL = {
+  coins: [0, 40, 70, 120, 200, 320], xp: [0, 60, 110, 190, 320, 520],
+  repeat: 0.25, clearCoins: 400, clearXp: 600,
+};
+
 export const ACH = [
   { id: 'first_blood', c: 'kills', goal: 1, coins: 30 },
   { id: 'slayer', c: 'kills', goal: 100, coins: 150, title: true },
@@ -293,6 +312,8 @@ export const ACH = [
   { id: 'holder', c: 'ptscore', goal: 50, coins: 150, title: true },
   { id: 'kingslayer', c: 'kingkills', goal: 5, coins: 150, title: true },
   { id: 'survivor', c: 'roundwins', goal: 10, coins: 200, title: true },
+  { id: 'duelist', c: 'duel_best', goal: 3, coins: 200, title: true },
+  { id: 'duel_master', c: 'duel_best', goal: 5, coins: 500, title: true },
 ];
 
 // 꾸미기 아이템 (슬롯: cape 망토 / hat 모자). 뽑기로만 얻음
@@ -353,13 +374,16 @@ export function gachaOdds(pool = 'gear') {
 
 /* ═════════ 게임 모드 / 맵 목표물 (서버·클라이언트 공용) ═════════
    ffa 개인전 · tdm 팀 데스매치 · ctf 깃발 뺏기 · points 거점 점령 · survival 생존전(라운드) · king 왕 지키기(라운드) */
-export const MODE_LIST = ['ffa', 'tdm', 'ctf', 'points', 'survival', 'king'];
-export const isTeamMode = (m) => m !== 'ffa';
+export const MODE_LIST = ['ffa', 'tdm', 'ctf', 'points', 'survival', 'king', 'duel'];
+// 공개 방 투표에는 1:1 전용인 결투는 올리지 않습니다
+export const VOTE_MODES = MODE_LIST.filter((m) => m !== 'duel');
+export const isTeamMode = (m) => m !== 'ffa' && m !== 'duel';
 export const MODE_RULES = {
   ctf: { caps: 3, returnMs: 15000, grab: 1.7 },
   points: { score: 100, radius: 4.2, rate: 24 },           // 거점 안 1명당 초당 24 (최대 3명), 100이면 점령
   survival: { rounds: 3, roundMs: 60000, pauseMs: 4000 },
   king: { rounds: 3, roundMs: 75000, pauseMs: 4000, dmgTaken: 0.7 },
+  duel: { stages: 5, stageMs: 120000, pauseMs: 5000 },
 };
 // 맵 곳곳에 놓이는 아이템. 먹으면 사라지고 respawnMs 뒤에 다시 생김
 export const ITEM_KINDS = {
@@ -367,6 +391,7 @@ export const ITEM_KINDS = {
   speed: { ms: 8000, mult: 1.35, color: 0x3be2d2 },
   rage: { ms: 8000, mult: 1.3, color: 0xe2a13b },
 };
+export const DUEL_ITEMS = 2; // 결투장은 좁아서 회복 아이템만 둡니다
 export const ITEM_RESPAWN_MS = 25000;
 export const ITEM_PICKUP_R = 1.3;
 
@@ -398,4 +423,15 @@ for (const m of Object.values(MAPS)) {
       { kind: 'rage', ...freeSpot(m, -h * 0.25, h * 0.25, 1.6) }, { kind: 'rage', ...freeSpot(m, h * 0.25, -h * 0.25, 1.6) },
     ],
   };
+  if (m.duelMap) m.obj.items = m.obj.items.slice(0, DUEL_ITEMS); // 결투장은 회복 아이템만
+  // 개인전용 생성 지점: 맵 가장자리를 빙 둘러 흩어 놓습니다 (팀 진영 두 곳만 쓰면 서로 바로 옆에서 태어남)
+  if (m.duelMap) m.ffaSpawns = m.spawns.map((s) => ({ x: s.x, z: s.z }));
+  else {
+    m.ffaSpawns = [];
+    const n = 12, rad = h * 0.74;
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2 + 0.26;
+      m.ffaSpawns.push(freeSpot(m, Math.cos(a) * rad, Math.sin(a) * rad, 1.2));
+    }
+  }
 }

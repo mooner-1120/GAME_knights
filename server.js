@@ -16,7 +16,7 @@ import {
   CLASSES, SKILLS, MAPS, PLAYER, MATCH, ROOM, CHAT, EMOTES, EMOTE_GAP_MS,
   PROJ, resolveCollision, lineBlocked, projBlocked,
   levelFor, xpForLevel, REWARD, ACH, ITEMS, ITEM_BY_ID, RARITY, GACHA, gachaWeights,
-  MODE_LIST, isTeamMode, MODE_RULES, ITEM_KINDS, ITEM_RESPAWN_MS, ITEM_PICKUP_R,
+  MODE_LIST, VOTE_MODES, isTeamMode, MODE_RULES, ITEM_KINDS, ITEM_RESPAWN_MS, ITEM_PICKUP_R, DUEL,
 } from './classes.js';
 import { dbEnabled, verifyUser, recordMatch, loadProgress, saveProgress } from './db.js';
 
@@ -31,6 +31,7 @@ const TICK_MS = 50;
 const MOVE_SLACK = 3.2; // 달리기 x 버프 x 슬라이딩 + 네트워크 오차 여유
 const EMOTE_IDS = new Set(EMOTES.map((e) => e.id));
 const MODES = MODE_LIST;
+const DUEL_STAGES = MODE_RULES.duel.stages;
 
 /* ───────────── 정적 파일 서버 ───────────── */
 const MIME = {
@@ -113,6 +114,7 @@ class Room {
     this.max = max;
     this.password = password || '';
     this.mode = mode;
+    if (mode === 'duel') this.max = 2; // 결투는 1:1 전용
     this.hostId = null;
     this.players = new Map();
     this.teamScore = { 1: 0, 2: 0 };
@@ -123,9 +125,12 @@ class Room {
     this.botTarget = 0;           // 방장이 정한 AI 수
     this.botDiff = 3;             // AI 난이도 1~5
     this.practice = false;        // 연습모드(혼자 하는 비공개 방)
+    this.baseMax = max;           // 결투(2인)로 바꿨다가 되돌릴 때 쓰는 원래 정원
+    this.duelStart = 1;           // 결투 시작 단계 (방장이 고른 난이도)
     this.setMap(mapId);
     this.endsAt = now() + MATCH.durationMs;
     this.initObjectives();
+    if (this.duel) this.endsAt = now() + MODE_RULES.duel.stageMs;
     if (this.round) this.startRound();
   }
   setMap(id) { this.mapId = MAPS[id] ? id : 'town'; this.map = MAPS[this.mapId]; }
@@ -143,6 +148,16 @@ class Room {
   get botCount() { return this.players.size - this.humans; }
   // 방장이 정한 AI 수만큼 채움 (사람이 들어오면 자리를 양보)
   syncBots() {
+    if (this.duel) { // 결투: 사람 1명당 AI 1명, 난이도는 현재 단계
+      this.botDiff = this.duel.stage;
+      const want = this.humans && !this.duel.pause && !this.over ? 1 : 0;
+      const bs = [...this.players.values()].filter((p) => p.bot);
+      let ch = false;
+      while (bs.length > want) { this.players.delete(bs.pop().id); ch = true; }
+      while (bs.length < want) { bs.push(addBot(this)); ch = true; }
+      if (ch) { this.broadcast({ t: 'roster', list: this.roster() }); this.broadcast(this.matchState()); }
+      return;
+    }
     const want = this.custom ? Math.min(this.botTarget, Math.max(0, this.max - this.humans)) : 0;
     const bots = [...this.players.values()].filter((p) => p.bot);
     let changed = false;
@@ -151,7 +166,7 @@ class Room {
     if (changed) { this.broadcast({ t: 'roster', list: this.roster() }); this.broadcast(this.matchState()); }
   }
   get teamMode() { return isTeamMode(this.mode); }
-  get paused() { return !!this.round && !this.round.active; } // 라운드 사이 (공격 불가)
+  get paused() { return (!!this.round && !this.round.active) || !!this.duel?.pause; } // 라운드 사이 (공격 불가)
   get limit() {
     switch (this.mode) {
       case 'tdm': return MATCH.teamKills;
@@ -159,6 +174,7 @@ class Room {
       case 'points': return MODE_RULES.points.score;
       case 'survival': return MODE_RULES.survival.rounds;
       case 'king': return MODE_RULES.king.rounds;
+      case 'duel': return DUEL_STAGES;
       default: return MATCH.ffaKills;
     }
   }
@@ -183,10 +199,20 @@ class Room {
     for (const p of this.players.values()) { if (p.team === 1) a++; else if (p.team === 2) b++; }
     return a <= b ? 1 : 2;
   }
+  // 적에게서 가장 먼 지점에서 되살아나게 합니다 (바로 옆에서 태어나 죽는 일 방지)
   spawnFor(p) {
     const sps = this.map.spawns;
-    const pool = this.teamMode ? sps.filter((s) => s.team === p.team) : sps;
-    const s = pool[Math.floor(Math.random() * pool.length)];
+    const pool = this.teamMode ? sps.filter((s) => s.team === p.team) : (this.map.ffaSpawns || sps);
+    const foes = [];
+    for (const q of this.players.values()) if (q !== p && q.alive && this.isFoe(p, q)) foes.push(q);
+    const scored = pool.map((sp) => {
+      let d = Infinity;
+      for (const q of foes) d = Math.min(d, Math.hypot(sp.x - q.x, sp.z - q.z));
+      return { sp, d };
+    });
+    let cand = scored.filter((c) => c.d >= PLAYER.safeSpawn);
+    if (!cand.length) { const far = Math.max(...scored.map((c) => c.d)); cand = scored.filter((c) => c.d >= far - 0.01); }
+    const s = cand[Math.floor(Math.random() * cand.length)].sp;
     const x = s.x + (Math.random() - 0.5) * 2;
     const z = s.z + (Math.random() - 0.5) * 2;
     return { x, y: 0, z, yaw: Math.atan2(x, z) };
@@ -216,20 +242,28 @@ class Room {
     this.projs = [];
     this.endsAt = now() + MATCH.durationMs;
     this.initObjectives();
+    if (this.duel) this.endsAt = now() + MODE_RULES.duel.stageMs; // 결투는 단계마다 제한 시간
     for (const p of this.players.values()) {
       p.kills = 0; p.deaths = 0; p.streak = 0; p.matchStart = now(); p.king = false;
       respawn(this, p.id, true);
     }
     if (this.round) this.startRound();
+    if (this.duel) this.syncBots(); // 결투: 새 판마다 상대 AI를 새로 붙임
     this.broadcast({ t: 'roster', list: this.roster() });
     this.broadcast(this.matchState());
   }
   // 모드/맵을 바꾸고 새 판 시작 (팀전이면 팀 균등 재배정)
   startNewMatch(mode, mapId) {
     if (mode) this.mode = mode;
+    this.max = this.mode === 'duel' ? 2 : (this.baseMax || this.max);
+    if (this.mode === 'duel') { // 1:1 — 남는 사람과 AI는 내보냄
+      const humans = [...this.players.values()].filter((x) => !x.bot);
+      for (const x of humans.slice(1)) { try { x.ws.close(); } catch { /* 이미 끊김 */ } this.players.delete(x.id); }
+      for (const b of [...this.players.values()]) if (b.bot) this.players.delete(b.id);
+    }
     if (mapId) this.setMap(mapId);
     let i = 0;
-    for (const p of this.players.values()) p.team = this.teamMode ? (i++ % 2) + 1 : 0;
+    for (const p of this.players.values()) p.team = this.teamMode || this.mode === 'duel' ? (i++ % 2) + 1 : 0; // 결투도 서로 적이 되도록 팀을 나눔
     this.resetMatch();
   }
   endMatch(winnerPlayer, winnerTeam, draw) {
@@ -256,6 +290,7 @@ class Room {
   }
   // 시간 종료: 가장 많이 처치한 사람/팀이 승리, 같으면 무승부
   timeUp() {
+    if (this.duel) return this.duelFail(null);
     if (this.teamMode) {
       const a = this.teamScore[1], b = this.teamScore[2];
       return a === b ? this.endMatch(null, null, true) : this.endMatch(null, a > b ? 1 : 2, false);
@@ -268,11 +303,11 @@ class Room {
   /* ── 투표 (공개 방) ── */
   startVote() {
     this.vote = { endsAt: now() + MATCH.voteMs, votes: new Map() };
-    this.broadcast({ t: 'votestart', modes: MODES, maps: MATCH.votableMaps, ms: MATCH.voteMs, mode: this.mode, map: this.mapId });
+    this.broadcast({ t: 'votestart', modes: VOTE_MODES, maps: MATCH.votableMaps, ms: MATCH.voteMs, mode: this.mode, map: this.mapId });
     this.later(() => this.finishVote(), MATCH.voteMs);
   }
   voteCounts() {
-    const mode = Object.fromEntries(MODES.map((m) => [m, 0]));
+    const mode = Object.fromEntries(VOTE_MODES.map((m) => [m, 0]));
     const map = Object.fromEntries(MATCH.votableMaps.map((m) => [m, 0]));
     for (const v of this.vote.votes.values()) {
       if (v.mode in mode) mode[v.mode]++;
@@ -283,7 +318,7 @@ class Room {
   castVote(p, m) {
     if (!this.vote || this.vote.done || this.vote.endsAt < now()) return;
     const v = this.vote.votes.get(p.id) || {};
-    if (MODES.includes(m.mode)) v.mode = m.mode;
+    if (VOTE_MODES.includes(m.mode)) v.mode = m.mode;
     if (MATCH.votableMaps.includes(m.map)) v.map = m.map;
     this.vote.votes.set(p.id, v);
     this.broadcast({ t: 'votestatus', ...this.voteCounts() });
@@ -352,6 +387,7 @@ function kill(p, q, o, tag) {
   }
   rm.broadcast({ t: 'roster', list: rm.roster() });
   rm.broadcast(rm.matchState());
+  if (rm.mode === 'duel') return q.bot ? rm.duelClear(p) : rm.duelFail(q); // 결투: 한 명이 쓰러지면 단계 종료
   if (rm.mode !== 'survival') rm.later(() => respawn(rm, q.id), PLAYER.respawnMs); // 생존전은 다음 라운드까지 부활 없음
   if (rm.mode === 'king' && q.king && rm.round?.active) return rm.endRound(p.team);    // 왕이 쓰러지면 라운드 종료
   if (rm.mode === 'ffa' ? p.kills >= rm.limit : rm.mode === 'tdm' && rm.teamScore[p.team] >= rm.limit) {
@@ -386,6 +422,7 @@ function applyHit(p, q, o, dx, dz, dist) {
   const fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);
   const t = now();
   const tfx = -Math.sin(q.yaw), tfz = -Math.cos(q.yaw);
+  if ((q.spawnGuard || 0) > t) return; // 되살아난 직후 잠깐은 무적 (스폰 킬 방지, 본인이 공격하면 바로 풀림)
   const facing = dist > 0.01 ? (tfx * -dx + tfz * -dz) / dist : 1;
   const guarding = !o.ignoreBlock && q.blocking && facing > 0.3;
 
@@ -496,7 +533,7 @@ function respawn(rm, id, force = false) {
   Object.assign(q, {
     x: s.x, y: s.y, z: s.z, yaw: s.yaw, pitch: 0, hp: CLASSES[q.cls].hp,
     alive: true, blocking: false, blockSince: 0, stunUntil: 0, buffUntil: 0, buffDmg: 1, buffSpeed: 1,
-    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), stance: 0, dmgLog: new Map(),
+    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), spawnGuard: now() + PLAYER.spawnGuardMs, stance: 0, dmgLog: new Map(),
   });
   q.lastState = now();
   if (changed) rm.broadcast({ t: 'roster', list: rm.roster() });
@@ -507,6 +544,7 @@ function respawn(rm, id, force = false) {
 function doAttack(p) {
   const rm = p.room;
   if (!p.alive || isStunned(p) || rm.over || rm.paused) return false;
+  p.spawnGuard = 0; // 내가 먼저 공격하면 무적 해제
   const c = CLASSES[p.cls];
   const t = now();
   if (t - p.lastAttack < c.cooldown * 1000 - 30) return false;
@@ -533,6 +571,7 @@ function useSkill(p, slot) {
   if (t < (p.cds[id] || 0) - 80) return;
   p.cds[id] = t + (id === 'kick' ? PLAYER.kickGapMs : def.cooldown * 1000);
   p.blocking = false;
+  if (!def.heal && !def.dur) p.spawnGuard = 0; // 공격 스킬을 쓰면 무적 해제
   rm.broadcast({ t: 'skill', id: p.id, skill: id });
 
   if (def.heal || def.dur) {
@@ -577,13 +616,17 @@ function useSkill(p, slot) {
 /* ───────────── 게임 모드 목표물 (깃발 · 거점 · 라운드 · 아이템) ───────────── */
 Room.prototype.initObjectives = function initObjectives() {
   const o = this.map.obj;
-  this.flags = null; this.points = null; this.round = null; this.kings = null;
+  this.flags = null; this.points = null; this.round = null; this.kings = null; this.duel = null;
   if (this.mode === 'ctf') {
     const mk = (team) => ({ team, hx: o.flags[team].x, hz: o.flags[team].z, x: o.flags[team].x, z: o.flags[team].z, state: 'home', carrier: null, dropAt: 0 });
     this.flags = { 1: mk(1), 2: mk(2) };
   }
   if (this.mode === 'points') this.points = o.points.map((p) => ({ x: p.x, z: p.z, balance: 0, owner: 0 }));
   if (this.mode === 'survival' || this.mode === 'king') this.round = { n: 0, active: false, endsAt: 0 };
+  if (this.mode === 'duel') {
+    this.duel = { stage: clamp(Math.floor(this.duelStart || 1), 1, DUEL_STAGES), pause: false };
+    this.botDiff = this.duel.stage;
+  } else this.duel = null;
   this.items = o.items.map((it) => ({ ...it, active: true, respawnAt: 0 }));
   this.ptClock = 0;
   this.lastObj = 0;
@@ -598,8 +641,43 @@ Room.prototype.objState = function objState() {
     o.round = { n: this.round.n, active: this.round.active, remainMs: this.round.active ? Math.max(0, this.round.endsAt - now()) : 0, alive: [alive[1], alive[2]] };
   }
   if (this.kings) o.kings = [this.kings[1] ?? null, this.kings[2] ?? null];
+  if (this.duel) o.duel = { stage: this.duel.stage, stages: DUEL_STAGES, pause: this.duel.pause };
   return o;
 };
+/* ── 결투(1:1 단계 도전) ── */
+Room.prototype.duelClear = function duelClear(winner) {
+  const d = this.duel;
+  if (!d || d.pause || this.over) return;
+  const stage = d.stage;
+  d.pause = true;
+  const last = stage >= DUEL_STAGES;
+  const reward = awardDuel(winner, stage, last);
+  this.broadcast({ t: 'duel', ev: 'clear', stage, stages: DUEL_STAGES, last });
+  if (reward) send(winner.ws, { t: 'duelreward', stage, last, ...reward });
+  for (const b of [...this.players.values()]) if (b.bot) this.players.delete(b.id);
+  this.broadcast({ t: 'roster', list: this.roster() });
+  if (last) return this.endMatch(winner, null, false);
+  d.stage = stage + 1;
+  this.botDiff = d.stage;
+  this.endsAt = now() + MODE_RULES.duel.pauseMs + MODE_RULES.duel.stageMs;
+  this.broadcast(this.matchState());
+  this.later(() => {
+    if (this.over || !this.duel) return;
+    this.duel.pause = false;
+    this.endsAt = now() + MODE_RULES.duel.stageMs;
+    for (const p of this.players.values()) if (!p.bot) { p.kills = 0; p.deaths = 0; respawn(this, p.id, true); }
+    this.syncBots();
+    this.broadcast({ t: 'duel', ev: 'start', stage: this.duel.stage, stages: DUEL_STAGES });
+    this.broadcast(this.matchState());
+  }, MODE_RULES.duel.pauseMs);
+};
+Room.prototype.duelFail = function duelFail() {
+  const d = this.duel;
+  if (!d || this.over) return;
+  this.broadcast({ t: 'duel', ev: 'fail', stage: d.stage, stages: DUEL_STAGES });
+  this.endMatch(null, null, false);
+};
+
 Room.prototype.objEvent = function objEvent(ev, p, team) { this.broadcast({ t: 'objevent', ev, by: p?.id ?? null, team: team ?? p?.team ?? 0 }); };
 Room.prototype.dropFlagOf = function dropFlagOf(p) {
   if (!this.flags) return;
@@ -878,6 +956,28 @@ function awardMatch(rm, winnerPlayer, winnerTeam, draw) {
   }
 }
 
+// 결투 단계 보상: 처음 깬 단계는 전액, 다시 깨면 일부만 (AI 반복 파밍 방지)
+function awardDuel(p, stage, last) {
+  const g = p?.prog;
+  if (!g) return null;
+  const best = g.counters.duel_best || 0;
+  const first = stage > best;
+  const mul = first ? 1 : DUEL.repeat;
+  let coins = Math.round(DUEL.coins[stage] * mul);
+  let xp = Math.round(DUEL.xp[stage] * mul);
+  if (last) { coins += Math.round(DUEL.clearCoins * mul); xp += Math.round(DUEL.clearXp * mul); }
+  const before = levelFor(g.xp);
+  g.xp += xp;
+  const after = levelFor(g.xp);
+  const lvBonus = (after - before) * REWARD.levelUpCoins;
+  g.coins += coins + lvBonus;
+  if (first) g.counters.duel_best = stage; // AI 방에서는 bump/setMax가 막혀 있어 직접 기록
+  checkAch(p);
+  sendProfile(p);
+  flushProg(p.userId);
+  return { coins: coins + lvBonus, xp, first, level: after, levelUp: after > before };
+}
+
 // 뽑기: 코인으로만 (결제 없음). 확률은 RARITY 가중치, 30번째까지 에픽 이상이 없으면 확정
 function pickRarity(list, W) {
   const ks = list.filter((k) => W[k] > 0);
@@ -968,7 +1068,7 @@ function addBot(rm) {
     id, ws: BOT_WS, room: rm, name: 'Knight', cls, team: rm.assignTeam(), userId: null, bot: true, x: 0, y: 0, z: 0, yaw: 0, pitch: 0,
     hp: CLASSES[cls].hp, alive: true, blocking: false, blockSince: 0, kills: 0, deaths: 0, lastAttack: 0,
     lastState: now(), lastChat: 0, lastEmote: 0, stunUntil: 0, buffUntil: 0, buffDmg: 1, buffSpeed: 1,
-    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), nextCls: null, stance: 0, dmgLog: new Map(), eq: randomBotEq(), matchStart: now(), streak: 0,
+    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), spawnGuard: now() + PLAYER.spawnGuardMs, nextCls: null, stance: 0, dmgLog: new Map(), eq: randomBotEq(), matchStart: now(), streak: 0,
     ai: { obj: Math.random() < 0.65, target: null, retargetAt: 0, actAt: 0, skillAt: 0, strafe: 1, strafeAt: 0, errYaw: 0, errPitch: 0, errAt: 0, blockAt: 0, blockEnd: 0, seen: 0, dash: null, avoidUntil: 0, avoidDir: 1, lx: 0, lz: 0, lcheck: 0 },
   };
   Object.assign(p, rm.spawnFor(p));
@@ -1145,12 +1245,13 @@ function botThink(rm, p, dt, t) {
 function sanitizeCreate(cr) {
   const name = cleanText(cr?.name, ROOM.nameLen) || 'Custom Room';
   const mode = MODES.includes(cr?.mode) ? cr.mode : 'ffa';
-  const mapId = MAPS[cr?.map] ? cr.map : 'town';
+  const mapId = MAPS[cr?.map] ? cr.map : mode === 'duel' ? 'duel' : 'town';
   let max = clamp(Math.floor(Number(cr?.max) || 8), 2, ROOM.maxCustomPlayers);
   if (cr?.practice) max = clamp(Math.floor(Number(cr?.bots) || 5) + 1, 2, ROOM.maxCustomPlayers);
+  if (mode === 'duel') max = 2; // 결투는 1:1 전용
   const password = cr?.practice ? Math.random().toString(36).slice(2, 10) : cleanText(cr?.password, ROOM.passLen); // 연습방은 비공개
   const practice = !!cr?.practice;
-  const bots = clamp(Math.floor(Number(cr?.bots) || 0), practice ? 1 : 0, max - 1);
+  const bots = mode === 'duel' ? 1 : clamp(Math.floor(Number(cr?.bots) || 0), practice ? 1 : 0, max - 1);
   const botDiff = clamp(Math.floor(Number(cr?.botDiff) || 3), 1, 5);
   return { name, mode, mapId, max, password, practice, bots, botDiff };
 }
@@ -1164,6 +1265,8 @@ function joinRoom(ws, user, m, prog) {
     room.practice = cfg.practice;
     room.botTarget = cfg.bots;
     room.botDiff = cfg.botDiff;
+    room.duelStart = cfg.botDiff;                       // 고른 난이도가 결투 시작 단계
+    if (room.duel) { room.duel.stage = cfg.botDiff; room.botDiff = cfg.botDiff; }
     rooms.set(room.id, room);
   } else if (m.room) {
     room = rooms.get(String(m.room));
@@ -1188,7 +1291,7 @@ function joinRoom(ws, user, m, prog) {
     id, ws, room, name, cls, team: room.assignTeam(), userId: user?.id || null, x: 0, y: 0, z: 0, yaw: 0, pitch: 0,
     hp: CLASSES[cls].hp, alive: true, blocking: false, blockSince: 0, kills: 0, deaths: 0, lastAttack: 0,
     lastState: now(), lastChat: 0, lastEmote: 0, stunUntil: 0, buffUntil: 0, buffDmg: 1, buffSpeed: 1,
-    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), nextCls: null, dmgLog: new Map(), prog: prog || null, matchStart: now(), streak: 0,
+    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), spawnGuard: now() + PLAYER.spawnGuardMs, nextCls: null, dmgLog: new Map(), prog: prog || null, matchStart: now(), streak: 0,
   };
   Object.assign(p, room.spawnFor(p));
   if (room.mode === 'survival' && room.round?.active) p.alive = false; // 생존전 도중에 들어오면 다음 라운드부터
@@ -1204,7 +1307,7 @@ function joinRoom(ws, user, m, prog) {
   sendProfile(p);
   room.broadcast({ t: 'roster', list: room.roster() });
   room.broadcast(room.matchState());
-  if (room.vote && !room.vote.done) send(ws, { t: 'votestart', modes: MODES, maps: MATCH.votableMaps, ms: Math.max(0, room.vote.endsAt - now()), mode: room.mode, map: room.mapId });
+  if (room.vote && !room.vote.done) send(ws, { t: 'votestart', modes: VOTE_MODES, maps: MATCH.votableMaps, ms: Math.max(0, room.vote.endsAt - now()), mode: room.mode, map: room.mapId });
   console.log(`[+] ${name} (${cls}${user ? ', 로그인' : ''}) → ${room.name} — ${room.players.size}명`);
 }
 
@@ -1303,7 +1406,11 @@ wss.on('connection', (ws) => {
     } else if (m.t === 'setbots') {
       if (!rm.custom || p.id !== rm.hostId) return;
       if (Number.isFinite(Number(m.count))) rm.botTarget = clamp(Math.floor(Number(m.count)), rm.practice ? 1 : 0, rm.max - 1);
-      if (Number.isFinite(Number(m.diff))) rm.botDiff = clamp(Math.floor(Number(m.diff)), 1, 5);
+      if (Number.isFinite(Number(m.diff))) {
+        rm.botDiff = clamp(Math.floor(Number(m.diff)), 1, 5);
+        rm.duelStart = rm.botDiff;
+        if (rm.duel && !rm.duel.pause) { rm.duel.stage = rm.botDiff; rm.startNewMatch(); return; } // 결투는 단계를 바꾸면 처음부터
+      }
       rm.syncBots();
       rm.broadcast(rm.matchState());
     } else if (m.t === 'setmode' || m.t === 'setroom') {
