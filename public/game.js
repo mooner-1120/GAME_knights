@@ -479,6 +479,10 @@ function getMats(id, skin) {
   return (matCache[key] = { head, torso, arm, leg, pauld });
 }
 
+// 무기 모델은 모두 자루가 원점, 날이 +Y 방향입니다. 그대로 쥐면 날의 '넓은 면'이 앞을 보게 되어
+// 칼등으로 때리는 것처럼 보이므로, 자루를 축으로 90도 돌려 날이 휘두르는 쪽을 향하게 합니다.
+// 류트는 휘두르는 무기가 아니라 앞면이 보여야 자연스러워서 그대로 둡니다.
+const weaponRoll = (W) => (W === 'lute' ? 0 : Math.PI / 2);
 function makeSword(len, wide = 1, trim = '#c79a3a') {
   const g = new THREE.Group();
   const steel = lam(0xdfe5ec), steel2 = lam(0xa4aeba), gold = lam(parseInt(trim.slice(1), 16)), leather = lam(0x3b2a1a);
@@ -634,7 +638,7 @@ function makeRig(clsId, name, team = 0, eq = null) {
   const W = L.weapon || 'sword';
   const sword = isBowCls(clsId) ? new THREE.Group() : makeWeapon(W, c, L);
   sword.position.set(0, -0.62, 0);
-  sword.rotation.x = -Math.PI / 2;
+  sword.rotation.set(-Math.PI / 2, weaponRoll(W), 0); // y = 자루를 축으로 돌리기 (날이 휘두르는 방향을 향하게)
   armR.add(sword);
   let bowPivot = null, bowModel = null, bowFx = null;
   if (isBowCls(clsId)) {
@@ -1070,7 +1074,7 @@ function buildViewmodel() {
   if (!isB && W !== 'sword') sword.scale.setScalar(0.7);
   sword.traverse((o) => { o.castShadow = false; });
   sword.position.y = -0.4;
-  sword.rotation.x = -Math.PI / 2;
+  sword.rotation.set(-Math.PI / 2, weaponRoll(W), 0);
   arm.add(sword);
   let shield = null;
   if (me.cls === 'shield') {
@@ -2305,8 +2309,20 @@ function tryAttack() {
 }
 const SLOT_IDX = { q: 0, r: 1, x: 2 };
 const skillOf = (cls, slot) => { const l = CLASSES[cls].skills || [CLASSES[cls].skill]; return slot === 'e' ? 'kick' : (l[SLOT_IDX[slot] ?? 0] || l[0]); };
+// 이전 동작이 끝나지 않았을 때 누른 키를 잠깐 기억했다가, 끝나는 즉시 대신 눌러 줍니다
+let skillBuf = null;
+const SKILL_BUF_MS = 500;
+function flushSkillBuf() {
+  if (!skillBuf) return;
+  if (performance.now() - skillBuf.at > SKILL_BUF_MS) { skillBuf = null; return; }
+  if (busy() || stunnedNow() || !me.alive) return;
+  const slot = skillBuf.slot;
+  skillBuf = null;
+  useSkill(slot);
+}
 function useSkill(slot) {
-  if (!me.alive || stunnedNow() || busy()) return;
+  if (!me.alive) return;
+  if (stunnedNow() || busy()) { skillBuf = { slot, at: performance.now() }; return; }
   const id = skillOf(me.cls, slot);
   const def = SKILLS[id];
   const t = performance.now();
@@ -3102,6 +3118,7 @@ function update(dt, nowMs) {
   if (Math.abs(camera.fov - targetFov) > 0.05) { camera.fov = lerp(camera.fov, targetFov, Math.min(1, dt * 8)); camera.updateProjectionMatrix(); }
 
   updateViewmodel(dt);
+  flushSkillBuf();
 
   // 다른 기사들
   const k = 1 - Math.exp(-14 * dt);
