@@ -24,7 +24,7 @@ const QUALITY = {
   mid: { ratio: 1, shadow: 1024 },
   high: { ratio: Math.min(window.devicePixelRatio || 1, 1.5), shadow: 2048 },
 };
-const DEFAULTS = { sens: 1, fov: 75, vol: 0.7, quality: IS_TOUCH ? 'low' : 'mid', minimap: true, netinfo: false, bob: true };
+const DEFAULTS = { sens: 1, fov: 75, vol: 0.7, quality: IS_TOUCH ? 'low' : 'mid', minimap: true, netinfo: false, bob: true, thirdPerson: false };
 const S = { ...DEFAULTS };
 try {
   const raw = JSON.parse(localStorage.getItem('ironoath_settings') || '{}');
@@ -40,7 +40,7 @@ const saveSettings = () => { try { localStorage.setItem('ironoath_settings', JSO
    내부 코드는 항상 "기본 키 이름"(KeyW 등)으로 통일합니다. 사용자가 바꾼 키는 canon()에서 기본 키로 바꿔 줍니다. */
 const BIND_DEFAULTS = {
   forward: 'KeyW', back: 'KeyS', left: 'KeyA', right: 'KeyD', sprint: 'ShiftLeft', jump: 'Space', crouch: 'KeyC',
-  block: 'KeyF', skill: 'KeyQ', skill2: 'KeyR', skill3: 'KeyX', kick: 'KeyE', emote: 'KeyV', chat: 'KeyY', teamchat: 'KeyT', board: 'Tab',
+  block: 'KeyF', skill: 'KeyQ', skill2: 'KeyR', skill3: 'KeyX', kick: 'KeyE', emote: 'KeyV', chat: 'KeyY', teamchat: 'KeyT', board: 'Tab', camera: 'KeyB',
 };
 const BIND_ORDER = Object.keys(BIND_DEFAULTS);
 const binds = { ...BIND_DEFAULTS };
@@ -925,64 +925,7 @@ function burst(x, y, z, color, n = 8) {
     parts.push({ m, vx: rand(-3, 3), vy: rand(1, 5), vz: rand(-3, 3), t: 0, life: rand(0.35, 0.6) });
   }
 }
-// 자유 형태 이펙트: 매 프레임 step(mesh, 진행도 0~1)을 불러 움직이고, 끝나면 정리합니다
-const fx2 = [];
-function addFx(mesh, dur, step) {
-  if (fx2.length > 90) { const o = fx2.shift(); scene.remove(o.m); o.m.material?.dispose?.(); }
-  scene.add(mesh);
-  fx2.push({ m: mesh, t: 0, dur, step });
-}
-const basic = (color, opacity = 1) => new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false });
-const sphGeo = new THREE.SphereGeometry(1, 10, 8);
-// 섬광: 빠르게 부풀었다 사라지는 빛 덩어리
-function flash(x, y, z, color, r = 2, dur = 0.35) {
-  const m = new THREE.Mesh(sphGeo, basic(color, 0.85));
-  m.position.set(x, y, z);
-  addFx(m, dur, (mm, u) => { mm.scale.setScalar(0.2 + r * easeOut(u)); mm.material.opacity = 0.85 * (1 - u) ** 1.5; });
-}
-// 빛기둥: 바닥에서 솟아오르는 기둥
-function pillar(x, z, color, h = 5, dur = 0.6) {
-  const m = new THREE.Mesh(BOX(1.3, h, 1.3), basic(color, 0.55));
-  m.position.set(x, h / 2, z);
-  addFx(m, dur, (mm, u) => { mm.scale.set(1 - u * 0.7, 1 + u * 0.5, 1 - u * 0.7); mm.position.y = h / 2 + u * 1.6; mm.material.opacity = 0.55 * (1 - u); });
-}
-// 칼자국: 휘두른 방향으로 길게 남는 호
-function slashArc(x, y, z, yaw, color, len = 3, dur = 0.26) {
-  const m = new THREE.Mesh(BOX(len, 0.16, 0.5), basic(color, 0.95));
-  m.position.set(x, y, z);
-  m.rotation.set(0, yaw, 0.5);
-  addFx(m, dur, (mm, u) => { mm.rotation.z = 0.5 - u * 1.6; mm.scale.set(1 + u * 0.5, 1, 1); mm.material.opacity = 0.95 * (1 - u); });
-}
-// 기운 띠: 몸 주위를 도는 작은 조각들
-function orbit(x, z, color, n = 6, rad = 1.3, dur = 0.9) {
-  for (let i = 0; i < n; i++) {
-    const m = new THREE.Mesh(BOX(0.16, 0.16, 0.16), basic(color, 1));
-    const a0 = (i / n) * Math.PI * 2;
-    addFx(m, dur, (mm, u) => {
-      const ang = a0 + u * 6;
-      mm.position.set(x + Math.cos(ang) * rad * (1 - u * 0.3), 0.4 + u * 2.4, z + Math.sin(ang) * rad * (1 - u * 0.3));
-      mm.material.opacity = 1 - u;
-    });
-  }
-}
-// 쏘는 방향으로 뻗는 빛줄기
-function beamFx(x, y, z, yaw, color, len = 6, dur = 0.2) {
-  const m = new THREE.Mesh(BOX(0.3, 0.3, len), basic(color, 0.8));
-  m.position.set(x - Math.sin(yaw) * len * 0.5, y, z - Math.cos(yaw) * len * 0.5);
-  m.rotation.y = yaw;
-  addFx(m, dur, (mm, u) => { mm.scale.set(1 - u, 1 - u, 1); mm.material.opacity = 0.8 * (1 - u); });
-}
-function updateFx2(dt) {
-  for (let i = fx2.length - 1; i >= 0; i--) {
-    const f = fx2[i];
-    f.t += dt;
-    const u = Math.min(1, f.t / f.dur);
-    f.step(f.m, u, dt);
-    if (u >= 1) { scene.remove(f.m); f.m.material?.dispose?.(); fx2.splice(i, 1); }
-  }
-}
 function updateFx(dt) {
-  updateFx2(dt);
   for (let i = fx.length - 1; i >= 0; i--) {
     const f = fx[i];
     f.t += dt;
@@ -1141,7 +1084,7 @@ function updateViewmodel(dt) {
     fp.boot.position.set(0.12, lerp(-0.85, -0.4, bootB), lerp(-0.1, -0.8, bootB));
     fp.boot.rotation.x = -0.35 * bootB;
   }
-  vm.visible = me.alive;
+  vm.visible = me.alive && !S.thirdPerson;
 }
 
 /* ═════════════ 사운드 (WebAudio) ═════════════
@@ -1489,6 +1432,76 @@ function actorPos(id) {
   return r ? { x: r.root.position.x, y: r.root.position.y, z: r.root.position.z } : null;
 }
 
+/* ── 1인칭 / 3인칭 ── */
+let myRig = null;               // 3인칭일 때 보이는 내 캐릭터
+let myRigKey = '';              // 직업·외형이 바뀌면 다시 만들기 위한 표시
+const camBack = new THREE.Vector3();
+function myEq() {
+  const e = prof && !prof.guest ? prof.equipped : null;
+  return e ? { cape: e.cape, hat: e.hat, skin: e.skins?.[me.cls] } : null;
+}
+function syncMyRig() {
+  const want = S.thirdPerson && joined;
+  if (!want) {
+    if (myRig) { scene.remove(myRig.root); myRig = null; myRigKey = ''; }
+    return;
+  }
+  const eq = myEq();
+  const key = `${me.cls}|${me.team}|${eq?.cape || ''}|${eq?.hat || ''}|${eq?.skin || ''}`;
+  if (myRig && myRigKey === key) return;
+  if (myRig) scene.remove(myRig.root);
+  myRig = makeRig(me.cls, '', me.team, eq);
+  myRig.cls = me.cls; myRig.id = me.id; myRig.yaw = me.yaw; myRig.pitch = 0; myRig.v = 0;
+  myRig.alive = true; myRig.blocking = false; myRig.stunUntil = 0; myRig.px = me.x; myRig.pz = me.z;
+  myRig.label.visible = false;  // 내 이름표는 띄우지 않습니다
+  myRigKey = key;
+  scene.add(myRig.root);
+}
+function toggleCam() {
+  if (!joined) return;
+  S.thirdPerson = !S.thirdPerson;
+  saveSettings();
+  syncMyRig();
+  const el = $('set-third');
+  if (el) el.checked = S.thirdPerson;
+  toast(t(S.thirdPerson ? 'cam_third' : 'cam_first'));
+}
+// 내 몸을 화면에 맞춰 움직입니다 (동작은 다른 기사들과 같은 코드를 씁니다)
+function updateMyRig(dt, nowMs) {
+  syncMyRig();
+  if (!myRig) return;
+  const r = myRig;
+  r.root.position.set(me.x, me.y, me.z);
+  r.yaw = me.yaw;
+  r.root.rotation.y = me.yaw;
+  r.pitch = me.pitch;
+  const d = Math.hypot(me.x - r.px, me.z - r.pz);
+  r.v = lerp(r.v, dt > 0 ? d / dt : 0, Math.min(1, dt * 10));
+  r.px = me.x; r.pz = me.z;
+  r.act = me.act;              // 공격·스킬 동작을 그대로 가져다 씁니다
+  const rs = stunnedNow();
+  animateRig(r, dt, {
+    stance: 0, v: r.v, air: me.y > 0.08, sprint: me.sprinting,
+    blocking: me.blocking && me.alive && !rs, pitch: me.pitch, onStep() {},
+  });
+  if (r.capeG) r.capeG.rotation.x = 0.1 + Math.min(r.v, 8) * 0.05 + Math.sin(nowMs * 0.006) * 0.03;
+  r.fall = lerp(r.fall, me.alive ? 0 : 1, Math.min(1, dt * 8));
+  r.root.rotation.x = r.fall * (Math.PI / 2);
+  r.stars.visible = rs && me.alive;
+  if (r.stars.visible) r.stars.rotation.y += dt * 5;
+  r.root.visible = me.alive;
+}
+// 벽을 뚫지 않도록 카메라를 뒤로 뺄 수 있는 만큼만 뺍니다
+function camDistance(ex, ez, bx, bz, want) {
+  let d = 0.4;
+  for (; d <= want; d += 0.25) {
+    const tx = ex + bx * d, tz = ez + bz * d;
+    const [rx, rz] = resolveCollision(tx, tz, 0.35);
+    if (Math.hypot(rx - tx, rz - tz) > 0.05) return Math.max(0.6, d - 0.35);
+  }
+  return want;
+}
+
 function resetLocal() {
   Object.assign(me, {
     vy: 0, blocking: false, sprinting: false,
@@ -1765,101 +1778,39 @@ function handle(m) {
   }
 }
 
-function actorYaw(id) {
-  if (id === me.id) return me.yaw;
-  const r = remotes.get(id);
-  return r ? r.root.rotation.y : 0;
-}
-/* 스킬 이펙트: [색, 연출 종류, 크기]
-   nova 주변 폭발 · slash 베기 · buff 기운 · heal 치유 · dash 돌진 · cast 원거리 시전 · blink 순간이동 */
+/* 스킬 이펙트: [색, 고리 크기] — 바닥 고리와 소리만 씁니다 (화면이 지저분해지지 않게) */
 const FX = {
-  rally: [0xffd45a, 'buff', 4.5], guardbreak: [0xffc07a, 'slash', 3.2], banner: [0xffd45a, 'heal', 5],
-  spin: [0xe9eef5, 'nova', 4.2], cleave: [0xffd2a0, 'slash', 4], warcry: [0xff9a3a, 'nova', 5.5],
-  lunge: [0x9effc0, 'dash', 3], riposte: [0x9effc0, 'buff', 3.2], flurry: [0xd8ffe8, 'slash', 2.8],
-  bash: [0xffe08a, 'nova', 3], bulwark: [0xffe08a, 'heal', 4], shieldcharge: [0xffd04a, 'dash', 3.4],
-  fireball: [0xff8a2a, 'cast', 3], frostnova: [0x8ae0ff, 'nova', 6], arcanehop: [0xb48aff, 'blink', 3.2],
-  shadowstep: [0x6a4aa0, 'blink', 3], smokebomb: [0x9aa0b0, 'buff', 4], poisonblade: [0x7ad04a, 'slash', 2.6],
-  volley: [0xc8e08a, 'cast', 3], piercing: [0xffe27a, 'cast', 3], rolldodge: [0xcfd8e4, 'dash', 2.4],
-  heal: [0x7dffa0, 'heal', 6], sanctuary: [0xfff0b0, 'heal', 7], condemn: [0xffe27a, 'slash', 3.4],
-  bloodrage: [0xff4a2a, 'buff', 3.5], whirlwind: [0xd8203a, 'nova', 4.4], headbutt: [0xffb07a, 'dash', 2.8],
-  smite: [0xffe27a, 'slash', 4.5], consecrate: [0xfff0b0, 'heal', 7], hammerfall: [0xffd04a, 'nova', 5.2],
-  ambush: [0x555577, 'dash', 3], vanish: [0x6a6a8a, 'buff', 3.4], execute: [0xff2a4a, 'slash', 3.4],
-  snare: [0x7fbf7f, 'cast', 2.5], multishot: [0xc8e08a, 'cast', 3], scoutdash: [0xaee08a, 'dash', 2.6],
-  drain: [0x9a4ac0, 'cast', 3], curse: [0x7a3ab0, 'cast', 3], boneshield: [0xe8e0cc, 'heal', 4],
-  palm: [0xffffff, 'nova', 3], flyingkick: [0xffd8a0, 'dash', 3], meditate: [0xffcf6a, 'heal', 5],
-  impale: [0xdfe5ec, 'slash', 4.2], sweep: [0xdfe5ec, 'nova', 4.8], charge: [0xc8d4e4, 'dash', 3.6],
-  anthem: [0xff8ad0, 'heal', 8], lullaby: [0xc08aff, 'nova', 6.5], healingsong: [0x8affd0, 'heal', 8],
-  hex: [0xe04a8a, 'cast', 3], shadowbolt: [0x4a2a7a, 'cast', 3], terror: [0x8a4aff, 'nova', 5.5],
-  overcharge: [0xffe27a, 'cast', 3], bolthail: [0xffc87a, 'cast', 3], brace: [0xffd89a, 'buff', 3],
-  bloom: [0x7dffa0, 'heal', 5], thorns: [0x4aa03a, 'nova', 5], barkskin: [0x8fc07a, 'heal', 6],
-  iaido: [0xffb0c0, 'slash', 4], kesagiri: [0xff8aa0, 'slash', 4.2], zanshin: [0xffc0d0, 'buff', 3.6],
-  kick: [0xffe0b0, 'slash', 2],
+  rally: [0xffd45a, 4.5], guardbreak: [0xffc07a, 3.2], banner: [0xffd45a, 5],
+  spin: [0xe9eef5, 4.2], cleave: [0xffd2a0, 4], warcry: [0xff9a3a, 5.5],
+  lunge: [0x9effc0, 3], riposte: [0x9effc0, 3.2], flurry: [0xd8ffe8, 2.8],
+  bash: [0xffe08a, 3], bulwark: [0xffe08a, 4], shieldcharge: [0xffd04a, 3.4],
+  fireball: [0xff8a2a, 3], frostnova: [0x8ae0ff, 6], arcanehop: [0xb48aff, 3.2],
+  shadowstep: [0x6a4aa0, 3], smokebomb: [0x9aa0b0, 4], poisonblade: [0x7ad04a, 2.6],
+  volley: [0xc8e08a, 3], piercing: [0xffe27a, 3], rolldodge: [0xcfd8e4, 2.4],
+  heal: [0x7dffa0, 6], sanctuary: [0xfff0b0, 7], condemn: [0xffe27a, 3.4],
+  bloodrage: [0xff4a2a, 3.5], whirlwind: [0xd8203a, 4.4], headbutt: [0xffb07a, 2.8],
+  smite: [0xffe27a, 4.5], consecrate: [0xfff0b0, 7], hammerfall: [0xffd04a, 5.2],
+  ambush: [0x555577, 3], vanish: [0x6a6a8a, 3.4], execute: [0xff2a4a, 3.4],
+  snare: [0x7fbf7f, 2.5], multishot: [0xc8e08a, 3], scoutdash: [0xaee08a, 2.6],
+  drain: [0x9a4ac0, 3], curse: [0x7a3ab0, 3], boneshield: [0xe8e0cc, 4],
+  palm: [0xffffff, 3], flyingkick: [0xffd8a0, 3], meditate: [0xffcf6a, 5],
+  impale: [0xdfe5ec, 4.2], sweep: [0xdfe5ec, 4.8], charge: [0xc8d4e4, 3.6],
+  anthem: [0xff8ad0, 8], lullaby: [0xc08aff, 6.5], healingsong: [0x8affd0, 8],
+  hex: [0xe04a8a, 3], shadowbolt: [0x4a2a7a, 3], terror: [0x8a4aff, 5.5],
+  overcharge: [0xffe27a, 3], bolthail: [0xffc87a, 3], brace: [0xffd89a, 3],
+  bloom: [0x7dffa0, 5], thorns: [0x4aa03a, 5], barkskin: [0x8fc07a, 6],
+  iaido: [0xffb0c0, 4], kesagiri: [0xff8aa0, 4.2], zanshin: [0xffc0d0, 3.6],
+  kick: [0xffe0b0, 2],
 };
 function skillFx(id, skill) {
   const p = actorPos(id);
   if (!p) return;
   const v = (b) => volFor(id, b);
-  const [col, kind, r = 3] = FX[skill] || [0xffffff, 'slash', 3];
-  const yaw = actorYaw(id);
-  const fx1 = -Math.sin(yaw), fz1 = -Math.cos(yaw);
-  const mine = id === me.id;
-  switch (kind) {
-    case 'nova': // 주변을 휩쓰는 폭발: 고리 3겹 + 섬광 + 불똥
-      ring(p.x, p.z, col, r, 0.45);
-      setTimeout(() => ring(p.x, p.z, col, r * 1.35, 0.55), 90);
-      setTimeout(() => ring(p.x, p.z, 0xffffff, r * 0.7, 0.35), 40);
-      flash(p.x, p.y + 1.1, p.z, col, r * 0.55, 0.3);
-      burst(p.x, p.y + 1, p.z, col, 14);
-      if (mine) me.shake = Math.max(me.shake, 0.45);
-      thud(v(0.4)); whoosh(v(0.3), 3000);
-      break;
-    case 'slash': // 베기: 칼자국 + 앞쪽 섬광
-      slashArc(p.x + fx1 * 1.1, p.y + 1.35, p.z + fz1 * 1.1, yaw, col, r, 0.26);
-      setTimeout(() => slashArc(p.x + fx1 * 1.3, p.y + 1.1, p.z + fz1 * 1.3, yaw + 0.35, 0xffffff, r * 0.8, 0.2), 60);
-      flash(p.x + fx1 * 1.6, p.y + 1.3, p.z + fz1 * 1.6, col, r * 0.4, 0.22);
-      burst(p.x + fx1 * 1.6, p.y + 1.3, p.z + fz1 * 1.6, col, 8);
-      if (mine) me.shake = Math.max(me.shake, 0.25);
-      whoosh(v(0.3), 3800);
-      break;
-    case 'buff': // 자기 강화: 빛기둥 + 몸 주위를 도는 기운
-      pillar(p.x, p.z, col, 4.5, 0.6);
-      orbit(p.x, p.z, col, 7, 1.4, 0.95);
-      ring(p.x, p.z, col, r, 0.6);
-      burst(p.x, p.y + 1, p.z, col, 10);
-      horn(v(0.3));
-      break;
-    case 'heal': // 치유/축복: 넓은 고리 2겹 + 위로 솟는 빛
-      ring(p.x, p.z, col, r, 0.7);
-      setTimeout(() => ring(p.x, p.z, 0xffffff, r * 0.6, 0.5), 110);
-      pillar(p.x, p.z, col, 5.5, 0.75);
-      orbit(p.x, p.z, col, 9, 1.8, 1.1);
-      burst(p.x, p.y + 1.2, p.z, col, 12);
-      horn(v(0.26));
-      break;
-    case 'dash': // 돌진: 진행 방향으로 잔상 + 바닥 고리
-      for (let i = 0; i < 5; i++) setTimeout(() => flash(p.x + fx1 * i * 0.9, p.y + 1, p.z + fz1 * i * 0.9, col, 0.9, 0.3), i * 35);
-      ring(p.x, p.z, col, r, 0.4);
-      burst(p.x, p.y + 0.6, p.z, col, 8);
-      whoosh(v(0.32), 4200);
-      break;
-    case 'cast': // 원거리 시전: 손끝 섬광 + 앞으로 뻗는 빛줄기
-      flash(p.x + fx1 * 0.9, p.y + 1.45, p.z + fz1 * 0.9, col, 1.1, 0.25);
-      beamFx(p.x + fx1 * 1.2, p.y + 1.4, p.z + fz1 * 1.2, yaw, col, 5, 0.22);
-      ring(p.x, p.z, col, r * 0.8, 0.45);
-      burst(p.x + fx1 * 1.2, p.y + 1.4, p.z + fz1 * 1.2, col, 9);
-      whoosh(v(0.26), 2600);
-      break;
-    case 'blink': // 순간이동: 떠난 자리와 도착지 양쪽에 흔적
-      flash(p.x, p.y + 1.1, p.z, col, 1.6, 0.35);
-      ring(p.x, p.z, col, r, 0.5);
-      orbit(p.x, p.z, col, 6, 1.1, 0.5);
-      burst(p.x, p.y + 1, p.z, col, 12);
-      whoosh(v(0.3), 5200);
-      break;
-    default:
-      ring(p.x, p.z, col, r, 0.6);
-      whoosh(v(0.25), 2500);
-  }
+  if (skill === 'rally' || skill === 'banner' || skill === 'anthem') { ring(p.x, p.z, 0xffd45a, 4.5, 0.7); horn(v(0.3)); return; }
+  if (skill === 'bash' || skill === 'kick' || skill === 'hammerfall') { thud(v(0.45)); whoosh(v(0.12), 1200); }
+  const f = FX[skill];
+  if (f) ring(p.x, p.z, f[0], f[1], 0.6);
+  whoosh(v(0.25), skill === 'lunge' || skill === 'charge' ? 4000 : 2500);
 }
 
 /* ═════════════ 메뉴 (ESC) ═════════════ */
@@ -1962,7 +1913,7 @@ for (const [key, id, oid, fmt] of setBinds) {
 }
 $('set-quality').value = S.quality;
 $('set-quality').onchange = (e) => { S.quality = e.target.value; applyQuality(); saveSettings(); };
-for (const [key, id] of [['minimap', 'set-minimap'], ['netinfo', 'set-netinfo'], ['bob', 'set-bob']]) {
+for (const [key, id] of [['minimap', 'set-minimap'], ['netinfo', 'set-netinfo'], ['bob', 'set-bob'], ['thirdPerson', 'set-third']]) {
   const el = $(id);
   el.checked = S[key];
   el.onchange = () => { S[key] = el.checked; applyHudSettings(); saveSettings(); };
@@ -2138,6 +2089,7 @@ addEventListener('keydown', (e) => {
   if (e.repeat || !joined || !locked()) return;
   if (code === 'KeyC') crouchPress = true;
   if (!me.alive && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) { cycleSpec(e.code === 'ArrowRight' ? 1 : -1); return; }
+  if (code === 'KeyB') toggleCam();
   if (code === 'KeyQ') useSkill('q');
   if (code === 'KeyR') useSkill('r');
   if (code === 'KeyX') useSkill('x');
@@ -2960,7 +2912,8 @@ function update(dt, nowMs) {
   me.slideTilt = lerp(me.slideTilt, me.slide ? 0.07 : 0, Math.min(1, dt * 10));
   const dead = joined && !me.alive;
   const spec = dead ? specTarget() : null;
-  vm.visible = !dead;
+  const third = S.thirdPerson && joined && !spec && !me.debugCam;
+  updateMyRig(dt, nowMs);
   if (spec && !me.debugCam) {
     const sp = spec.root.position, sy = spec.yaw;
     const wx = sp.x + Math.sin(sy) * 3.4, wy = sp.y + 2.3, wz = sp.z + Math.cos(sy) * 3.4;
@@ -2970,9 +2923,19 @@ function update(dt, nowMs) {
     camera.lookAt(sp.x, sp.y + 1.3, sp.z);
   } else if (!me.debugCam) {
     specCam.set(0, 0, 0);
-    const bob = S.bob ? Math.abs(Math.cos(me.bobPhase)) * 0.035 * me.mv : 0;
+    const bob = S.bob && !third ? Math.abs(Math.cos(me.bobPhase)) * 0.035 * me.mv : 0;
     const sh = me.shake * 0.02;
-    camera.position.set(me.x + rand(-sh, sh), me.y + (dead ? 0.35 : me.eyeH + bob), me.z + rand(-sh, sh));
+    const ey = me.y + (dead ? 0.35 : me.eyeH + bob);
+    if (third && !dead) {
+      // 보는 방향의 반대쪽으로 카메라를 뺍니다 (조준과 공격 판정은 1인칭과 똑같습니다)
+      const cp = Math.cos(me.pitch);
+      camBack.set(Math.sin(me.yaw) * cp, -Math.sin(me.pitch), Math.cos(me.yaw) * cp);
+      const want = 3.5;
+      const d = camDistance(me.x, me.z, camBack.x, camBack.z, want);
+      camera.position.set(me.x + camBack.x * d + rand(-sh, sh), Math.max(0.5, ey + 0.35 + camBack.y * d), me.z + camBack.z * d + rand(-sh, sh));
+    } else {
+      camera.position.set(me.x + rand(-sh, sh), ey, me.z + rand(-sh, sh));
+    }
     const wob = stunned ? Math.sin(nowMs * 0.012) * 0.04 : 0;
     camera.rotation.set(
       dead ? -0.2 : me.pitch - me.kick,
