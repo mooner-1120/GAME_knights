@@ -397,6 +397,7 @@ function kill(p, q, o, tag) {
 
 // o: { reach, cos, dmg, skill, ignoreBlock, knock, stun, lifesteal, selfHeal, counter, ranged, multi, proj }
 // 근접은 즉시 판정, 원거리(화살·마법탄)는 launch()로 실제 투사체를 날립니다.
+const D2R = Math.PI / 180;
 function strike(p, o) {
   const rm = p.room;
   if (!rm || !p.alive || rm.over || rm.paused) return;
@@ -406,9 +407,15 @@ function strike(p, o) {
     if (q === p || !q.alive || !rm.isFoe(p, q)) continue;
     const dx = q.x - p.x, dz = q.z - p.z;
     const dist = Math.hypot(dx, dz);
-    if (dist > o.reach + PLAYER.radius) continue;
+    if (dist > o.reach + PLAYER.radius + PLAYER.hitSlop) continue;
     if (Math.abs(q.y - p.y) > 1.8) continue;
-    if (o.cos > -1 && dist > 0.6 && (dx * fx + dz * fz) / dist < o.cos) continue;
+    // 상대의 '점'이 아니라 '몸'을 기준으로 각도를 봅니다. 가까울수록 더 너그러워집니다.
+    if (o.cos > -1 && dist > 0.6) {
+      const ang = Math.acos(Math.max(-1, Math.min(1, (dx * fx + dz * fz) / dist)));
+      const half = Math.acos(Math.max(-1, Math.min(1, o.cos)));
+      const body = Math.min(PLAYER.hitSlack * D2R, Math.asin(Math.min(0.95, (PLAYER.radius + PLAYER.hitSlop) / Math.max(dist, 0.8))));
+      if (ang > Math.min(half + body, PLAYER.hitMaxAngle * D2R)) continue;
+    }
     if (lineBlocked(p.x, p.z, q.x, q.z, rm.map)) continue;
     applyHit(p, q, o, dx, dz, dist);
     if (rm.over) return;
@@ -551,7 +558,7 @@ function doAttack(p) {
   p.lastAttack = t;
   p.blocking = false;
   rm.broadcast({ t: 'swing', id: p.id });
-  const cos = Math.cos(((c.cone ?? 50) * Math.PI) / 180);
+  const cos = Math.cos(((c.cone ?? PLAYER.defaultCone) * Math.PI) / 180);
   rm.later(() => {
     const counter = p.counterUntil > now();
     if (counter) p.counterUntil = 0;
@@ -560,11 +567,13 @@ function doAttack(p) {
   return true;
 }
 
+const SLOT_IDX = { q: 0, r: 1, x: 2 }; // Q·R·X = 직업 스킬 1·2·3
 function useSkill(p, slot) {
   const rm = p.room;
   if (rm.over || rm.paused) return;
   const c = CLASSES[p.cls];
-  const id = slot === 'e' ? 'kick' : c.skill;
+  const list = c.skills || [c.skill];
+  const id = slot === 'e' ? 'kick' : (list[SLOT_IDX[slot] ?? 0] || list[0]);
   const def = SKILLS[id];
   if (!def) return;
   const t = now();
@@ -597,6 +606,7 @@ function useSkill(p, slot) {
     p.x = bx; p.z = bz;
     send(p.ws, { t: 'correct', x: p.x, y: p.y, z: p.z });
   }
+  if (def.move) return; // 순수 이동기 (타격 없음)
   const reach = def.reach ?? c.reach + (def.reachAdd || 0);
   const cos = def.cone >= 360 ? -2 : Math.cos((def.cone * Math.PI) / 180);
   rm.later(() => {
@@ -1083,8 +1093,17 @@ Room.prototype.stepBots = function stepBots(dt) {
 };
 
 function botSkill(rm, p, tg, d, los, aligned, L, t) {
-  const c = CLASSES[p.cls], id = c.skill, def = SKILLS[id];
-  if (!def || t < (p.cds[id] || 0)) return false;
+  const c = CLASSES[p.cls];
+  // 쓸 수 있는 스킬을 모두 살펴보고 지금 상황에 맞는 것을 씁니다 (Q·R·X)
+  for (const [i, sid] of (c.skills || [c.skill]).entries()) {
+    if (t >= (p.cds[sid] || 0) && botTrySkill(rm, p, tg, d, los, aligned, t, sid, SLOT_KEYS[i])) return true;
+  }
+  return false;
+}
+const SLOT_KEYS = ['q', 'r', 'x'];
+function botTrySkill(rm, p, tg, d, los, aligned, t, id, slot) {
+  const c = CLASSES[p.cls], def = SKILLS[id];
+  if (!def) return false;
   const a = p.ai;
   let use = false;
   const allies = rm.teamMode ? [...rm.players.values()].filter((q) => q !== p && q.alive && q.team === p.team && Math.hypot(q.x - p.x, q.z - p.z) <= (def.radius || 0)) : [];
@@ -1092,13 +1111,14 @@ function botSkill(rm, p, tg, d, los, aligned, L, t) {
   else if (def.dur) use = d < 16 && (allies.length > 0 || !def.radius || !rm.teamMode);       // 버프는 아군이 가까이 있을 때 (팀 전체에 적용)
   else {
     const reach = def.reach ?? c.reach + (def.reachAdd || 0);
-    if (def.blink) use = los && aligned && d > 3.5 && d < def.blink + reach;
+    if (def.move) use = aligned && d > 6 && d < 26;  // 순수 이동기는 거리 좁힐 때만
+    else if (def.blink) use = los && aligned && d > 3.5 && d < def.blink + reach;
     else if (def.dash) use = aligned && d > 2.2 && d < def.dash.speed * def.dash.dur + reach * 0.8;
     else if (reach > 6) use = los && aligned && d <= reach * 0.95;
     else use = aligned && d <= reach + 0.3;
   }
   if (!use) return false;
-  useSkill(p, 'q');
+  useSkill(p, slot);
   if (def.dash) a.dash = { dx: -Math.sin(p.yaw), dz: -Math.cos(p.yaw), speed: def.dash.speed, end: t + def.dash.dur * 1000 };
   return true;
 }
@@ -1376,7 +1396,7 @@ wss.on('connection', (ws) => {
       doAttack(p);
     } else if (m.t === 'skill') {
       if (!p.alive || isStunned(p) || rm.over) return;
-      if (m.slot !== 'q' && m.slot !== 'e') return;
+      if (!['q', 'r', 'x', 'e'].includes(m.slot)) return;
       useSkill(p, m.slot);
     } else if (m.t === 'setclass') {
       if (!CLASSES[m.cls] || m.cls === p.cls) return;
