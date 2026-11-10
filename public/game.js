@@ -1032,7 +1032,7 @@ function updateFx(dt) {
 /* ═════════════ 상태 ═════════════ */
 const me = {
   id: null, cls: 'knight', x: 0, y: 0, z: 0, vy: 0, yaw: 0, pitch: 0,
-  hp: 100, alive: false, blocking: false, lastAtk: 0, onGround: true,
+  hp: 100, alive: false, blocking: false, lastAtk: 0, onGround: true, poisonUntil: 0,
   sprinting: false,
   sprintB: 0, slide: null, crouching: false, slideCd: 0, eyeH: PLAYER.eye, slideTilt: 0, blockB: 0, act: null, dash: null, stunUntil: 0, buffUntil: 0, buffSpeed: 1, counterUntil: 0, team: 0, cd: {},
   bobPhase: 0, mv: 0, stepIdx: 0, kick: 0, roll: 0, shake: 0, fovK: 0, pendingCls: null,
@@ -1465,6 +1465,7 @@ function updateHudFrame(nowMs, dt) {
     const st = $('status');
     const items = [];
     if (nowMs < me.buffUntil) items.push(t('st_buff', { s: ((me.buffUntil - nowMs) / 1000).toFixed(1) }));
+    if (nowMs < me.poisonUntil) items.push(t('st_poison', { s: ((me.poisonUntil - nowMs) / 1000).toFixed(1) }));
     if (nowMs < me.counterUntil) items.push(t('st_counter'));
     if (nowMs < me.stunUntil) items.push(t('st_stun'));
     if (st.dataset.k !== items.join('|')) {
@@ -1651,6 +1652,7 @@ function updateMyRig(dt, nowMs) {
   r.stars.visible = rs && me.alive;
   if (r.stars.visible) r.stars.rotation.y += dt * 5;
   r.root.visible = me.alive;
+  if (me.poisonUntil > nowMs && me.alive && Math.random() < dt * 9) burst(me.x, me.y + 1.2, me.z, 0x6fd34a, 2);
 }
 // 벽을 뚫지 않도록 카메라를 뒤로 뺄 수 있는 만큼만 뺍니다
 function camDistance(ex, ez, bx, bz, want) {
@@ -1665,7 +1667,7 @@ function camDistance(ex, ez, bx, bz, want) {
 
 function resetLocal() {
   Object.assign(me, {
-    vy: 0, blocking: false, sprinting: false,
+    vy: 0, blocking: false, sprinting: false, poisonUntil: 0,
     sprintB: 0, slide: null, crouching: false, slideCd: 0, eyeH: PLAYER.eye, slideTilt: 0, blockB: 0, act: null, dash: null, stunUntil: 0, buffUntil: 0, cd: {}, kick: 0, roll: 0, shake: 0, fovK: 0, pendingCls: null,
   });
 }
@@ -1747,21 +1749,20 @@ function handle(m) {
       if (m.id === me.id) {
         me.hp = m.hp;
         updateHud();
-        $('dmg').style.opacity = m.blocked ? 0.25 : 0.8;
+        $('dmg').style.opacity = m.tag === 'poison' ? 0.3 : m.blocked ? 0.25 : 0.8;
         setTimeout(() => ($('dmg').style.opacity = 0), 120);
-        me.kick += m.blocked ? 0.02 : 0.05;
-        me.shake = Math.max(me.shake, m.blocked ? 0.25 : 0.6);
+        if (m.tag !== 'poison') { me.kick += m.blocked ? 0.02 : 0.05; me.shake = Math.max(me.shake, m.blocked ? 0.25 : 0.6); }
       }
-      if (pos) burst(pos.x, pos.y + 1.1, pos.z, m.blocked ? 0xcfd8e8 : 0xc23b2e, m.blocked ? 5 : 9);
+      if (pos) burst(pos.x, pos.y + 1.1, pos.z, m.tag === 'poison' ? 0x6fd34a : m.blocked ? 0xcfd8e8 : 0xc23b2e, m.tag === 'poison' ? 5 : m.blocked ? 5 : 9);
       if (m.by === me.id && m.id !== me.id) {
         const h = $('hitmark');
         const isKill = m.hp <= 0;
         h.className = m.blocked ? 'blocked' : isKill ? 'kill' : '';
         h.style.opacity = 1;
         setTimeout(() => (h.style.opacity = 0), isKill ? 320 : 150);
-        if (pos) dmgNumber(pos.x, pos.y + 2.1, pos.z, (m.tag === 'counter' ? t('counter_tag') : m.tag === 'back' ? t('back_tag') : '') + (m.hp <= 0 ? '☠ ' : '') + m.dmg, m.blocked ? 'blocked' : m.hp <= 0 ? 'kill' : m.skill || m.tag ? 'skill' : m.dmg >= 30 ? 'big' : '');
+        if (pos) dmgNumber(pos.x, pos.y + 2.1, pos.z, (m.tag === 'counter' ? t('counter_tag') : m.tag === 'back' ? t('back_tag') : m.tag === 'poison' ? '🧪 ' : '') + (m.hp <= 0 ? '☠ ' : '') + m.dmg, m.blocked ? 'blocked' : m.hp <= 0 ? 'kill' : m.skill || m.tag ? 'skill' : m.dmg >= 30 ? 'big' : '');
       }
-      m.blocked ? clang(volFor(m.id, 0.35)) : thud(volFor(m.id, 0.5));
+      if (m.tag !== 'poison') { m.blocked ? clang(volFor(m.id, 0.35)) : thud(volFor(m.id, 0.5)); }
       break;
     }
     case 'kill':
@@ -1905,6 +1906,12 @@ function handle(m) {
     case 'roundend':
       banner(m.winner ? t('round_win', { t: t('team_' + m.winner) }) : t('round_draw'));
       break;
+    case 'poison': {
+      const r = m.id === me.id ? null : remotes.get(m.id);
+      if (m.id === me.id) { me.poisonUntil = m.on ? performance.now() + m.ms : 0; if (m.on) toast(t('poisoned')); }
+      else if (r) r.poisonUntil = m.on ? performance.now() + m.ms : 0;
+      break;
+    }
     case 'matchend':
       showMatchEnd(m);
       break;
@@ -3152,6 +3159,7 @@ function update(dt, nowMs) {
     if (r.bubble && nowMs > r.bubble.until) clearBubble(r);
     r.stars.visible = rs && r.alive;
     if (r.stars.visible) r.stars.rotation.y += dt * 5;
+    if (r.poisonUntil > nowMs && r.alive && Math.random() < dt * 9) burst(pos.x, pos.y + 1.2, pos.z, 0x6fd34a, 2);
   }
   updateFx(dt);
   updateShots(dt);
