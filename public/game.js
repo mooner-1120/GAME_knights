@@ -1099,8 +1099,11 @@ const PF = {
   raised: { a: 2.6, w: -0.2,  yw: -0.3 },
   end:    { a: 1.5, w: -1.8,  yw: 0.7 },
 };
+let vmShown = false;   // 지금 화면에 1인칭 팔을 보여야 하는지 (프레임마다 카메라 쪽에서 정함)
 function updateViewmodel(dt) {
   if (!fp) return;
+  fp.arm.visible = true;
+  if (fp.shield) fp.shield.visible = true;
   const c = CLASSES[me.cls];
   me.sprintB = lerp(me.sprintB, me.sprinting ? 1 : 0, Math.min(1, dt * 9));
   me.blockB = lerp(me.blockB, me.blocking ? 1 : 0, Math.min(1, dt * 14));
@@ -1228,7 +1231,7 @@ function updateViewmodel(dt) {
     fp.boot.position.set(0.12, lerp(-0.85, -0.4, bootB), lerp(-0.1, -0.8, bootB));
     fp.boot.rotation.x = -0.35 * bootB;
   }
-  vm.visible = me.alive && !S.thirdPerson;
+  if (!vmShown) { fp.arm.visible = false; if (fp.shield) fp.shield.visible = false; fp.boot.visible = false; }
 }
 
 /* ═════════════ 사운드 (WebAudio) ═════════════
@@ -1622,10 +1625,15 @@ function updateMyRig(dt, nowMs) {
   const d = Math.hypot(me.x - r.px, me.z - r.pz);
   r.v = lerp(r.v, dt > 0 ? d / dt : 0, Math.min(1, dt * 10));
   r.px = me.x; r.pz = me.z;
-  r.act = me.act;              // 공격·스킬 동작을 그대로 가져다 씁니다
+  // 공격·스킬 동작은 1인칭과 같은 것을 쓰되, 진행 시간은 따로 셉니다 (같은 객체를 쓰면 두 배로 빨라짐)
+  if (me.act) {
+    if (!r.act || r.act.src !== me.act) r.act = { ...me.act, src: me.act };
+    else r.act.t = me.act.t;
+  } else r.act = null;
   const rs = stunnedNow();
   animateRig(r, dt, {
-    stance: 0, v: r.v, air: me.y > 0.08, sprint: me.sprinting,
+    stance: me.slide ? 2 : me.crouching ? 1 : 0,   // 0 서기 / 1 웅크리기 / 2 슬라이딩
+    v: r.v, air: me.y > 0.08, sprint: me.sprinting,
     blocking: me.blocking && me.alive && !rs, pitch: me.pitch, onStep() {},
   });
   if (r.capeG) r.capeG.rotation.x = 0.1 + Math.min(r.v, 8) * 0.05 + Math.sin(nowMs * 0.006) * 0.03;
@@ -3057,6 +3065,9 @@ function update(dt, nowMs) {
   const dead = joined && !me.alive;
   const spec = dead ? specTarget() : null;
   const third = S.thirdPerson && joined && !spec && !me.debugCam;
+  // 1인칭 팔·무기는 "1인칭으로 내가 살아 있을 때"만 보입니다 (3인칭·관전·디버그 시점에서는 숨김)
+  vmShown = joined && me.alive && !third && !spec && !me.debugCam;
+  vm.visible = vmShown;
   updateMyRig(dt, nowMs);
   if (spec && !me.debugCam) {
     const sp = spec.root.position, sy = spec.yaw;
