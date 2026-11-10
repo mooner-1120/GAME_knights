@@ -131,7 +131,9 @@ class Room {
     this.endsAt = now() + MATCH.durationMs;
     this.initObjectives();
     if (this.duel) this.endsAt = now() + MODE_RULES.duel.stageMs;
-    if (this.round) this.startRound();
+    // 라운드는 사람이 들어온 뒤에 시작합니다. 빈 방에서 시작하면 왕이 정해지지 않고,
+    // 생존전은 들어가자마자 '라운드 도중 입장'으로 처리되어 관전만 하게 됩니다.
+    if (this.round && this.humans) this.startRound();
   }
   setMap(id) { this.mapId = MAPS[id] ? id : 'town'; this.map = MAPS[this.mapId]; }
   later(fn, ms) {
@@ -1168,6 +1170,43 @@ function botGoal(rm, p) {
     for (const it of rm.items) if (it.active && it.kind === 'health') { const d = Math.hypot(it.x - p.x, it.z - p.z); if (d < bd) { bd = d; best = it; } }
     if (best) return { x: best.x, z: best.z, priority: true };
   }
+  // 왕 지키기: 왕은 도망치고, 나머지는 적 왕을 노리거나 우리 왕을 지킨다
+  if (rm.mode === 'king' && rm.kings) {
+    if (p.king) {
+      let near = null, nd = 16, guard = null, gd = Infinity;
+      for (const q of rm.players.values()) {
+        if (!q.alive) continue;
+        const d = Math.hypot(q.x - p.x, q.z - p.z);
+        if (rm.isFoe(p, q)) { if (d < nd) { nd = d; near = q; } }
+        else if (q !== p && d < gd) { gd = d; guard = q; }
+      }
+      if (near) { // 적이 붙으면 적 반대쪽 + 아군 쪽으로 물러난다 (호위병에게 붙어야 산다)
+        let dx = p.x - near.x, dz = p.z - near.z;
+        const l = Math.hypot(dx, dz) || 1;
+        dx /= l; dz /= l;
+        if (guard && gd > 3) { const bx = guard.x - p.x, bz = guard.z - p.z, bl = Math.hypot(bx, bz) || 1; dx += (bx / bl) * 0.9; dz += (bz / bl) * 0.9; }
+        const fl = Math.hypot(dx, dz) || 1;
+        const h = rm.map.half - 3;
+        return { x: clamp(p.x + (dx / fl) * 16, -h, h), z: clamp(p.z + (dz / fl) * 16, -h, h), priority: true, keepAway: true };
+      }
+      if (guard && gd > 10) return { x: guard.x, z: guard.z, keepAway: true }; // 평소엔 아군 가까이
+      const sp = rm.map.spawns.find((s2) => s2.team === p.team);
+      return sp ? { x: sp.x, z: sp.z, keepAway: true } : null;
+    }
+    const myKing = rm.players.get(rm.kings[p.team]);
+    const foeKing = rm.players.get(rm.kings[3 - p.team]);
+    // 팀을 반으로 나눠 절반은 우리 왕 호위, 절반은 적 왕 사냥 (전원이 몰려가면 우리 왕이 죽는다)
+    let idx = 0;
+    for (const q of rm.players.values()) if (q.bot && q.team === p.team && q.id < p.id) idx++;
+    const guardDuty = idx % 2 === 0;
+    if (guardDuty && myKing?.alive && myKing !== p) {
+      const d = Math.hypot(myKing.x - p.x, myKing.z - p.z);
+      if (d > 7) return { x: myKing.x, z: myKing.z, priority: d > 14 };
+      return null; // 왕 곁이면 주변의 적과 싸운다
+    }
+    if (foeKing?.alive) return { x: foeKing.x, z: foeKing.z, priority: true };  // 적 왕 사냥
+    if (myKing?.alive && Math.hypot(myKing.x - p.x, myKing.z - p.z) > 12) return { x: myKing.x, z: myKing.z };
+  }
   if (!p.ai.obj) return null; // 일부 봇은 목표 대신 싸움에 집중
   if (rm.flags) {
     const mine = rm.flags[p.team], enemy = rm.flags[3 - p.team];
@@ -1273,6 +1312,8 @@ function botThink(rm, p, dt, t) {
   if (useGoal) {
     const gl = Math.hypot(ax, az);
     if (gl > 1.4) { mx = ax / gl; mz = az / gl; }
+  } else if (goal?.keepAway && d < prefer * 2.2) { // 왕: 붙지 말고 물러난다
+    mx = -ux; mz = -uz;
   } else if (buddy && Math.hypot(buddy.x - p.x, buddy.z - p.z) > 6 && d > prefer * 1.2) {
     const bx = buddy.x - p.x, bz = buddy.z - p.z, bl = Math.hypot(bx, bz) || 1;
     mx = bx / bl; mz = bz / bl;
@@ -1356,6 +1397,8 @@ function joinRoom(ws, user, m, prog) {
   ws.room = room;
   if (room.custom && room.hostId == null) room.hostId = id; // 방을 만든 사람이 방장
   room.syncBots();
+  // 첫 사람이 들어왔는데 라운드가 아직 안 돌고 있으면 지금 시작
+  if (room.round && !room.round.active && !room.over && room.humans === 1) room.startRound();
   send(ws, {
     t: 'welcome', id, cls, team: p.team, x: p.x, y: p.y, z: p.z, yaw: p.yaw, hp: p.hp, alive: p.alive,
     roster: room.roster(), authed: !!user, prog: !!prog, db: dbEnabled, room: room.info(), map: room.mapId,
