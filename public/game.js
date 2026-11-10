@@ -876,6 +876,7 @@ function seg(m, a, b) { // 길이 1짜리 가는 막대를 두 점 사이에 맞
   m.scale.z = len;
   m.quaternion.setFromUnitVectors(_Zaxis, _seg.set(dx / len, dy / len, dz / len));
 }
+const WEAPON_TILT = 1.1; // 손에 든 무기를 앞으로 눕히는 각도(라디안)
 function animateRig(r, dt, o) {
   const c = CLASSES[r.cls];
   r.phase += o.v * dt * 2.4 * (o.sprint ? 0.85 : 1);
@@ -915,6 +916,10 @@ function animateRig(r, dt, o) {
     if (P.rz !== undefined) rz = P.rz;
     if (P.lz !== undefined) lz = P.lz;
   }
+
+  // 무기를 손목 기준으로 앞으로 눕힙니다. 이게 없으면 모든 무기가 하늘로 꼿꼿이 서서
+  // 도끼가 깃대처럼 보입니다. 창의 두 손 잡는 위치 계산도 이 값을 쓰므로 여기서 한 번만 바꿉니다.
+  wr -= WEAPON_TILT;
 
   // ── 두 손 처리 ──
   const SH = 0.3375, SY = 0.675;
