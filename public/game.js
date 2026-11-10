@@ -714,8 +714,33 @@ function castPose(u, uh) {
   if (u < uh) return mixP(CAST.raised, CAST.end, (u - a) / Math.max(0.01, uh - a));
   return mixP(CAST.end, CAST.idle, easeInOut(Math.min(1, (u - uh) / Math.max(0.15, (1 - uh) * 0.8))));
 }
-const RANGED_SK = { fireball: 1, volley: 1, snare: 1, drain: 1, hex: 1, overcharge: 1 };
-const POSE_OF = { ambush: 'lunge', iaido: 'lunge', shadowstep: 'lunge', impale: 'lunge', palm: 'bash', smite: 'bash', anthem: 'rally', bloodrage: 'rally', heal: 'rally', bloom: 'rally' };
+// 원거리(활 당기기 / 지팡이 시전) 동작을 쓰는 스킬
+const RANGED_SK = { fireball: 1, volley: 1, snare: 1, drain: 1, hex: 1, overcharge: 1, piercing: 1, multishot: 1, bolthail: 1, curse: 1, shadowbolt: 1 };
+/* 스킬마다 쓰는 몸동작. 1인칭(손에 든 무기)과 3인칭(캐릭터) 양쪽에서 같은 이름을 씁니다.
+   overhead 내려찍기 · swipe 가로베기 · stab 연속찌르기 · spin 회전 · lunge 찌르며 돌진 · bash 밀치기
+   kick 발차기 · flykick 날아차기 · headbutt 박치기 · ground 바닥치기 · guard 웅크려 막기
+   pray 두 팔 들어올리기 · rally 무기 들고 외치기 · stance 자세잡기 · dodge 몸 낮추기 · blink 팔 펼치기 · throw 던지기 */
+const SK_POSE = {
+  rally: 'rally', guardbreak: 'swipe', banner: 'rally',
+  spin: 'spin', cleave: 'overhead', warcry: 'rally',
+  lunge: 'lunge', riposte: 'stance', flurry: 'stab',
+  bash: 'bash', bulwark: 'guard', shieldcharge: 'bash',
+  frostnova: 'ground', arcanehop: 'blink',
+  shadowstep: 'lunge', smokebomb: 'throw', poisonblade: 'swipe',
+  rolldodge: 'dodge',
+  heal: 'pray', sanctuary: 'pray', condemn: 'overhead',
+  bloodrage: 'rally', whirlwind: 'spin', headbutt: 'headbutt',
+  smite: 'overhead', consecrate: 'pray', hammerfall: 'overhead',
+  ambush: 'lunge', vanish: 'guard', execute: 'overhead',
+  scoutdash: 'dodge', boneshield: 'guard',
+  palm: 'bash', flyingkick: 'flykick', meditate: 'pray',
+  impale: 'lunge', sweep: 'spin', charge: 'lunge',
+  anthem: 'rally', lullaby: 'rally', healingsong: 'pray',
+  terror: 'ground', brace: 'stance',
+  bloom: 'pray', thorns: 'ground', barkskin: 'pray',
+  iaido: 'lunge', kesagiri: 'overhead', zanshin: 'stance',
+  kick: 'kick',
+};
 function emotePose(id, t, u) {
   const e = Math.min(1, u * 6) * Math.min(1, (1 - u) * 6);
   switch (id) {
@@ -745,8 +770,20 @@ function swingKeys(t, c) {
   if (t < s.total) return ['end', 'idle', easeInOut((t - s.raise - s.strike) / s.rec)];
   return null;
 }
-const SKILL_DUR = { spin: 0.5, lunge: 0.45, bash: 0.45, rally: 0.8, kick: 0.45, ambush: 0.4, iaido: 0.4, shadowstep: 0.4 };
-const SKILL_FREE = { rally: true, anthem: true, bloodrage: true, heal: true, bloom: true }; // 시전 중에도 움직이고 공격할 수 있는 스킬
+const SKILL_DUR = {
+  spin: 0.5, lunge: 0.45, bash: 0.45, rally: 0.8, kick: 0.45, ambush: 0.4, iaido: 0.4, shadowstep: 0.4,
+  rolldodge: 0.45, scoutdash: 0.45, headbutt: 0.5, flyingkick: 0.55, shieldcharge: 0.5, charge: 0.6,
+  cleave: 0.75, hammerfall: 0.8, kesagiri: 0.6, condemn: 0.6, execute: 0.65, guardbreak: 0.55,
+  poisonblade: 0.5, flurry: 0.6, whirlwind: 0.6, sweep: 0.6, frostnova: 0.65, thorns: 0.65, terror: 0.6,
+  arcanehop: 0.5, smokebomb: 0.5, warcry: 0.7, lullaby: 0.8, meditate: 0.9, consecrate: 0.9, sanctuary: 0.9,
+};
+// 시전 중에도 움직이고 공격할 수 있는 스킬 (내 몸을 강화하거나 치유하는 것들)
+const SKILL_FREE = {
+  rally: true, anthem: true, bloodrage: true, heal: true, bloom: true,
+  banner: true, bulwark: true, sanctuary: true, consecrate: true, boneshield: true,
+  meditate: true, healingsong: true, barkskin: true, brace: true, riposte: true,
+  vanish: true, smokebomb: true, zanshin: true,
+};
 const skillDur = (id) => SKILL_DUR[id] || (SKILLS[id]?.windup ? SKILLS[id].windup + 0.4 : 0.8);
 
 function actionPose(a, c) {
@@ -765,12 +802,52 @@ function actionPose(a, c) {
     const sk = SKILLS[a.id];
     return isBowCls(c.id) ? drawPose(u, sk.windup / a.dur, weaponOf(c.id) === 'crossbow') : castPose(u, sk.windup / a.dur);
   }
-  switch (POSE_OF[a.id] || a.id) {
+  const bell = (x) => Math.sin(clamp(x, 0, 1) * Math.PI);          // 0 → 1 → 0
+  const upDown = (x, at) => (x < at ? easeOut(x / at) : 1 - easeInOut(Math.min(1, (x - at) / Math.max(0.12, 1 - at))));
+  switch (SK_POSE[a.id] || 'swipe') {
     case 'spin': return { arm: 1.55, wr: -1.55, al: 1.3, ln: -0.1, tw: 0, spin: easeInOut(u) * TAU, st: 0.3 };
     case 'lunge': { const k = Math.min(1, u / 0.3); return { arm: lerp(0.9, 1.55, k), wr: lerp(0.5, -1.55, k), al: -0.8 * k, ln: -0.6 * k, tw: 0.25 * k, st: 0.95 * k }; }
-    case 'bash': { const b = Math.sin(Math.min(1, u) * Math.PI); return { arm: 1.0, wr: 0.3, al: lerp(0.5, 1.75, b), ln: -0.35 * b, tw: 0.15 * b, st: 0.5 * b, sp: b }; }
+    case 'bash': { const b = bell(u); return { arm: 1.0, wr: 0.3, al: lerp(0.5, 1.75, b), ln: -0.35 * b, tw: 0.15 * b, st: 0.5 * b, sp: b }; }
     case 'rally': { const e = Math.min(1, u * 5) * Math.min(1, (1 - u) * 5); return { arm: lerp(0.85, 2.9, e), wr: lerp(0.5, -1.35, e), al: lerp(0, 2.9, e), ln: 0.15 * e, hx: 0.4 * e }; }
-    case 'kick': { const b = Math.sin(Math.min(1, u / 0.66) * Math.PI); return { legR: 1.6 * b, arm: 0.5, al: 0.2, wr: 0.5, ln: 0.25 * b, tw: 0 }; }
+    case 'kick': { const b = bell(Math.min(1, u / 0.66)); return { legR: 1.6 * b, arm: 0.5, al: 0.2, wr: 0.5, ln: 0.25 * b, tw: 0 }; }
+    // 머리 위로 들었다가 힘껏 내려찍기
+    case 'overhead': { const k = u < 0.42 ? easeOut(u / 0.42) : 1, d = u < 0.42 ? 0 : easeOut((u - 0.42) / 0.58);
+      return { arm: lerp(lerp(0.85, 3.0, k), 1.25, d), wr: lerp(lerp(0.5, 0.35, k), -1.8, d), al: lerp(0.3 * k, 1.1 * d, 0.6),
+        ln: lerp(0.3 * k, -0.45 * d, 0.7), tw: -0.3 * k + 0.35 * d, st: -0.3 * k + 0.8 * d, hx: 0.25 * k - 0.2 * d }; }
+    // 옆으로 크게 가로베기
+    case 'swipe': { const k = upDown(u, 0.4), t2 = u < 0.4 ? -0.8 * easeOut(u / 0.4) : lerp(-0.8, 0.9, easeOut((u - 0.4) / 0.6));
+      return { arm: lerp(0.85, 1.6, k), wr: lerp(0.5, -1.45, k), al: 0.5 * k, tw: t2, ln: -0.12 * k, st: 0.5 * k, rz: 0.06 + 0.5 * k }; }
+    // 짧게 여러 번 찌르기
+    case 'stab': { const p = Math.abs(Math.sin(u * Math.PI * 3));
+      return { arm: lerp(1.0, 1.5, p), wr: lerp(0.2, -1.5, p), al: -0.5 * p, ln: -0.4 * p, tw: 0.3 * p, st: 0.6 * p }; }
+    // 몸을 웅크려 막아 서기
+    case 'guard': { const b = bell(u);
+      return { arm: lerp(0.85, 1.5, b), wr: lerp(0.5, -0.25, b), al: lerp(0, 1.5, b), ln: 0.3 * b, st: 0.25 * b, hx: -0.25 * b, sp: b }; }
+    // 두 팔을 천천히 하늘로
+    case 'pray': { const e = Math.min(1, u * 3.2) * Math.min(1, (1 - u) * 3.2);
+      return { arm: lerp(0.85, 2.75, e), wr: lerp(0.5, -0.7, e), al: lerp(0, 2.75, e), ln: 0.18 * e, hx: -0.45 * e, st: 0.1 * e }; }
+    // 들었다가 바닥을 내려치기
+    case 'ground': { const k = u < 0.45 ? easeOut(u / 0.45) : 1, d = u < 0.45 ? 0 : easeOut((u - 0.45) / 0.55);
+      return { arm: lerp(lerp(0.85, 2.5, k), 0.35, d), wr: lerp(lerp(0.5, 0.2, k), 0.9, d), al: lerp(lerp(0, 2.2, k), 0.3, d),
+        ln: lerp(0.35 * k, 0.75 * d, 0.7), st: 0.15 * k + 0.45 * d, hx: 0.3 * k - 0.4 * d }; }
+    // 몸을 낮춰 재빨리 빠져나가기
+    case 'dodge': { const b = bell(u);
+      return { arm: lerp(0.85, 0.35, b), wr: 0.6, al: lerp(0, 0.45, b), ln: 0.95 * b, st: 0.75 * b, hx: 0.35 * b, tw: 0.2 * b }; }
+    // 두 팔을 활짝 펼치며 사라지기
+    case 'blink': { const e = Math.min(1, u * 4) * Math.min(1, (1 - u) * 2.2);
+      return { arm: lerp(0.85, 2.1, e), wr: lerp(0.5, -0.4, e), al: lerp(0, 2.1, e), rz: 0.06 + 0.9 * e, lz: -0.06 - 0.9 * e, hx: -0.3 * e, ln: -0.15 * e }; }
+    // 아래에서 위로 던지기
+    case 'throw': { const k = u < 0.35 ? easeOut(u / 0.35) : 1, d = u < 0.35 ? 0 : easeOut((u - 0.35) / 0.65);
+      return { arm: lerp(lerp(0.85, 0.3, k), 2.3, d), wr: lerp(0.5, -0.3, d), al: 0.3 * k, ln: lerp(0.25 * k, -0.3 * d, 0.7), tw: -0.3 * k + 0.4 * d, st: 0.4 * d }; }
+    // 머리로 들이받기
+    case 'headbutt': { const b = bell(Math.min(1, u / 0.7));
+      return { arm: lerp(0.85, 0.45, b), wr: 0.6, al: 0.45 * b, hx: 0.65 * b, ln: -0.55 * b, st: 0.7 * b, tw: 0.1 * b }; }
+    // 몸을 날려 걷어차기
+    case 'flykick': { const b = bell(Math.min(1, u / 0.75));
+      return { legR: 2.0 * b, arm: lerp(0.85, 0.3, b), al: 0.7 * b, wr: 0.5, ln: -0.65 * b, tw: 0.15 * b }; }
+    // 무기를 세워 자세 잡기
+    case 'stance': { const e = Math.min(1, u * 3) * Math.min(1, (1 - u) * 2.4);
+      return { arm: lerp(0.85, 1.85, e), wr: lerp(0.5, -1.15, e), al: lerp(0, 0.9, e), tw: -0.4 * e, rz: 0.06 + 0.45 * e, ln: 0.1 * e, st: -0.25 * e }; }
   }
   return null;
 }
@@ -1050,19 +1127,86 @@ function updateViewmodel(dt) {
             if (ac.mirror) yw = -yw * 0.8;
           }
         }
-      } else if (ac.id === 'spin') {
-        a = 1.5; w = -1.5; yw = lerp(-0.9, 1.5, easeInOut(u)); me.roll = Math.sin(u * TAU) * 0.05;
-      } else if (ac.id === 'lunge') {
-        const k = Math.min(1, u / 0.25);
-        a = lerp(1.3, 1.55, k); w = lerp(-0.35, -1.55, k); yw = 0.35; oz = -0.25 * Math.sin(Math.min(1, u * 2) * Math.PI);
-      } else if (ac.id === 'bash') {
-        a = 1.2; shieldPush = Math.sin(Math.min(1, u) * Math.PI);
-        if (!fp.shield) { a = 1.3; w = -0.8; oz = -0.2 * shieldPush; }
-      } else if (ac.id === 'rally') {
-        const e = Math.min(1, u * 5) * Math.min(1, (1 - u) * 5);
-        a = lerp(a, 2.9, e); w = lerp(w, -1.35, e); yw = lerp(yw, 0, e);
-      } else if (ac.id === 'kick') {
-        a = 0.7; bootB = Math.sin(Math.min(1, u / 0.66) * Math.PI);
+      } else if (ac.kind === 'skill') {
+        // 스킬마다 손에 든 무기가 실제로 움직이도록 (3인칭 몸동작과 같은 이름을 씁니다)
+        const bell = (x) => Math.sin(clamp(x, 0, 1) * Math.PI);
+        const bl = bell(u);
+        if (RANGED_SK[ac.id] && fp.bow) {
+          const d = drawAmt(u, (SKILLS[ac.id]?.windup || 0.3) / ac.dur);
+          a = lerp(1.2, 1.95, d); yw = lerp(0.15, 0.55, d); w = 0;
+        } else if (RANGED_SK[ac.id]) {
+          const d = drawAmt(u, (SKILLS[ac.id]?.windup || 0.3) / ac.dur);
+          a = lerp(1.3, 2.5, d); w = lerp(-0.35, 0.2, d); yw = lerp(0.12, -0.15, d); oz = -0.2 * d; oy = 0.12 * d;
+        } else switch (SK_POSE[ac.id] || 'swipe') {
+          case 'spin':
+            a = 1.5; w = -1.5; yw = lerp(-0.9, 1.5, easeInOut(u)); me.roll = Math.sin(u * TAU) * 0.05; break;
+          case 'lunge': {
+            const k = Math.min(1, u / 0.25);
+            a = lerp(1.3, 1.55, k); w = lerp(-0.35, -1.55, k); yw = 0.35; oz = -0.25 * bell(Math.min(1, u * 2)); break;
+          }
+          case 'bash':
+            a = 1.2; shieldPush = bl;
+            if (!fp.shield) { a = 1.3; w = -0.8; oz = -0.2 * bl; }
+            break;
+          case 'rally': {
+            const e = Math.min(1, u * 5) * Math.min(1, (1 - u) * 5);
+            a = lerp(a, 2.9, e); w = lerp(w, -1.35, e); yw = lerp(yw, 0, e); oy = 0.1 * e; break;
+          }
+          case 'kick': a = 0.7; bootB = bell(Math.min(1, u / 0.66)); break;
+          case 'flykick': a = 0.55; bootB = bell(Math.min(1, u / 0.8)); oy = -0.12 * bootB; break;
+          case 'overhead': {          // 머리 위로 들었다가 내려찍기
+            const k = u < 0.42 ? easeOut(u / 0.42) : 1, d = u < 0.42 ? 0 : easeOut((u - 0.42) / 0.58);
+            a = lerp(lerp(1.3, 2.95, k), 1.15, d); w = lerp(lerp(-0.35, 0.1, k), -1.9, d);
+            yw = lerp(0.12, -0.12, k) + 0.25 * d; oy = 0.18 * k - 0.22 * d; oz = -0.18 * d;
+            if (d > 0.45) me.kick = Math.max(me.kick, 0.05);
+            break;
+          }
+          case 'swipe': {             // 옆으로 크게 베기
+            const k = u < 0.4 ? easeOut(u / 0.4) : 1 - easeInOut((u - 0.4) / 0.6);
+            a = lerp(1.3, 1.6, k); w = lerp(-0.35, -1.5, k);
+            yw = u < 0.4 ? lerp(0.12, -0.85, easeOut(u / 0.4)) : lerp(-0.85, 0.95, easeOut((u - 0.4) / 0.6));
+            ox = -0.1 * k; break;
+          }
+          case 'stab': {              // 짧게 여러 번 찌르기
+            const p = Math.abs(Math.sin(u * Math.PI * 3));
+            a = lerp(1.25, 1.5, p); w = lerp(-0.3, -1.5, p); yw = 0.2; oz = -0.3 * p; break;
+          }
+          case 'guard':               // 몸 앞으로 끌어당겨 막기
+            a = lerp(1.3, 1.55, bl); w = lerp(-0.35, -0.15, bl); yw = lerp(0.12, 0.5, bl);
+            shieldPush = bl * 0.7; oz = 0.14 * bl; oy = 0.06 * bl; break;
+          case 'pray': {              // 두 손을 하늘로
+            const e = Math.min(1, u * 3.2) * Math.min(1, (1 - u) * 3.2);
+            a = lerp(1.3, 2.7, e); w = lerp(-0.35, -0.6, e); yw = lerp(0.12, -0.05, e); oy = 0.2 * e; break;
+          }
+          case 'ground': {            // 들었다가 바닥 내려치기
+            const k = u < 0.45 ? easeOut(u / 0.45) : 1, d = u < 0.45 ? 0 : easeOut((u - 0.45) / 0.55);
+            a = lerp(lerp(1.3, 2.6, k), 0.45, d); w = lerp(lerp(-0.35, 0.2, k), 0.8, d);
+            oy = 0.2 * k - 0.4 * d; oz = -0.12 * d;
+            if (d > 0.4) me.kick = Math.max(me.kick, 0.07);
+            break;
+          }
+          case 'dodge':               // 몸 낮추기
+            a = lerp(1.3, 0.9, bl); w = lerp(-0.35, 0.1, bl); yw = lerp(0.12, 0.45, bl);
+            oy = -0.3 * bl; oz = 0.18 * bl; me.roll = Math.sin(u * Math.PI) * 0.07; break;
+          case 'blink': {             // 팔을 펼치며 사라지기
+            const e = Math.min(1, u * 4) * Math.min(1, (1 - u) * 2.2);
+            a = lerp(1.3, 2.1, e); w = lerp(-0.35, -0.2, e); yw = lerp(0.12, 0.75, e); ox = 0.16 * e; oy = 0.1 * e; break;
+          }
+          case 'throw': {             // 아래에서 위로 던지기
+            const k = u < 0.35 ? easeOut(u / 0.35) : 1, d = u < 0.35 ? 0 : easeOut((u - 0.35) / 0.65);
+            a = lerp(lerp(1.3, 0.75, k), 2.25, d); w = lerp(-0.35, -0.25, d);
+            oy = -0.16 * k + 0.2 * d; oz = 0.12 * k - 0.2 * d; break;
+          }
+          case 'headbutt':            // 머리로 들이받기 (손은 내리고 화면이 앞으로)
+            a = lerp(1.3, 0.7, bl); yw = lerp(0.12, 0.5, bl); oy = -0.22 * bl;
+            me.kick = Math.max(me.kick, 0.1 * bl); break;
+          case 'stance': {            // 무기를 세워 자세 잡기
+            const e = Math.min(1, u * 3) * Math.min(1, (1 - u) * 2.4);
+            a = lerp(1.3, 1.9, e); w = lerp(-0.35, -1.2, e); yw = lerp(0.12, -0.35, e); oy = 0.08 * e; break;
+          }
+          default:
+            a = lerp(1.3, 1.65, bl); w = lerp(-0.35, -1.3, bl); yw = lerp(0.12, -0.3, bl);
+        }
       }
     }
   }
