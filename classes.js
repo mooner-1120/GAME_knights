@@ -165,7 +165,7 @@ export const SKILLS = {
   frostnova: { id: 'frostnova', name: '서리 폭발', icon: '❄️', key: 'R', desc: '주변을 얼려 0.9초 기절', cooldown: 13, windup: 0.25, reach: 6, cone: 360, dmgMult: 0.8, stun: 900, ignoreBlock: true },
   arcanehop: { id: 'arcanehop', name: '공간 도약', icon: '🌀', key: 'X', desc: '10m 순간이동 후 주변을 밀어냄', cooldown: 10, windup: 0.1, blink: 10, reach: 3.2, cone: 360, dmgMult: 0.6, knock: 2.5 },
   smokebomb: { id: 'smokebomb', name: '연막탄', icon: '💨', key: 'R', desc: '4초간 이동속도 +40%', cooldown: 14, dur: 4000, dmgMult: 1, speedMult: 1.4 },
-  poisonblade: { id: 'poisonblade', name: '독칼', icon: '🧪', key: 'X', desc: '준 피해의 40%를 회복', cooldown: 8, windup: 0.12, reachAdd: 0.3, cone: 55, dmgMult: 1.3, lifesteal: 0.4 },
+  poisonblade: { id: 'poisonblade', name: '독칼', icon: '🧪', key: 'X', desc: '중독시켜 5초간 초당 5의 피해, 준 피해의 40%를 회복', cooldown: 8, windup: 0.12, reachAdd: 0.3, cone: 55, dmgMult: 1.0, lifesteal: 0.4, poison: { dmg: 5, ms: 5000, everyMs: 1000 } },
   piercing: { id: 'piercing', proj: 'arrow', name: '관통 사격', icon: '🎯', key: 'R', desc: '방어를 뚫는 강한 한 발', cooldown: 11, windup: 0.45, reach: 36, cone: 4, dmgMult: 2.0, ignoreBlock: true },
   rolldodge: { id: 'rolldodge', name: '구르기', icon: '🤸', key: 'X', desc: '앞으로 재빠르게 굴러 거리를 벌린다', cooldown: 7, windup: 0.05, move: true, dash: { speed: 20, dur: 0.26 } },
   sanctuary: { id: 'sanctuary', name: '성역', icon: '🕊️', key: 'R', desc: '체력 15 회복, 5초간 공격력 +15% (반경 9m 아군 포함)', cooldown: 16, heal: 15, dur: 5000, dmgMult: 1.15, speedMult: 1.05, radius: 9 },
@@ -437,6 +437,7 @@ export const ITEM_KINDS = {
   rage: { ms: 8000, mult: 1.3, color: 0xe2a13b },
 };
 export const DUEL_ITEMS = 2; // 결투장은 좁아서 회복 아이템만 둡니다
+export const POISON_TICK_MS = 250;  // 중독 피해를 확인하는 주기
 export const ITEM_RESPAWN_MS = 25000;
 export const ITEM_PICKUP_R = 1.3;
 

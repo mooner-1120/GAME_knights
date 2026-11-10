@@ -16,7 +16,7 @@ import {
   CLASSES, SKILLS, MAPS, PLAYER, MATCH, ROOM, CHAT, EMOTES, EMOTE_GAP_MS,
   PROJ, resolveCollision, lineBlocked, projBlocked,
   levelFor, xpForLevel, REWARD, ACH, ITEMS, ITEM_BY_ID, RARITY, GACHA, gachaWeights,
-  MODE_LIST, VOTE_MODES, isTeamMode, MODE_RULES, ITEM_KINDS, ITEM_RESPAWN_MS, ITEM_PICKUP_R, DUEL,
+  MODE_LIST, VOTE_MODES, isTeamMode, MODE_RULES, ITEM_KINDS, ITEM_RESPAWN_MS, ITEM_PICKUP_R, DUEL, POISON_TICK_MS,
 } from './classes.js';
 import { dbEnabled, verifyUser, recordMatch, loadProgress, saveProgress } from './db.js';
 
@@ -453,6 +453,12 @@ function applyHit(p, q, o, dx, dz, dist) {
   lg.set(p.id, le);
   rm.broadcast({ t: 'hit', id: q.id, by: p.id, dmg, hp: q.hp, blocked: guarding, skill: o.skill || null, tag });
   if (o.skill === 'kick') bump(p, 'kicks');
+  // 중독: 일정 시간 동안 조금씩 피해. 다시 맞으면 시간이 갱신됩니다 (겹쳐서 쌓이지는 않음)
+  if (o.poison && !guarding) {
+    const ticks = Math.max(1, Math.round(o.poison.ms / o.poison.everyMs));
+    q.poison = { by: p.id, name: p.name, cls: p.cls, skill: o.skill, dmg: o.poison.dmg, every: o.poison.everyMs, left: ticks, next: t + o.poison.everyMs };
+    rm.broadcast({ t: 'poison', id: q.id, on: true, ms: o.poison.ms, by: p.id });
+  }
   if (o.lifesteal) heal(p, dmg * o.lifesteal);
   if (o.selfHeal) heal(p, o.selfHeal);
 
@@ -465,6 +471,36 @@ function applyHit(p, q, o, dx, dz, dist) {
   } else {
     kill(p, q, o, tag);
   }
+}
+
+// 중독 피해 진행: 시간이 되면 조금씩 깎고, 쓰러지면 중독시킨 사람에게 처치를 줍니다
+function stepPoison(rm, t) {
+  for (const q of [...rm.players.values()]) {
+    const po = q.poison;
+    if (!po) continue;
+    if (!q.alive || rm.over || rm.paused) { clearPoison(rm, q); continue; }
+    if (t < po.next) continue;
+    po.next += po.every;
+    po.left--;
+    const dmg = Math.max(1, Math.round(po.dmg * (q.king ? MODE_RULES.king.dmgTaken : 1)));
+    q.hp = Math.max(0, q.hp - dmg);
+    const lg = q.dmgLog || (q.dmgLog = new Map());
+    const le = lg.get(po.by) || { dmg: 0, hits: 0 };
+    le.dmg += dmg; le.hits++; le.name = po.name; le.cls = po.cls; le.skill = po.skill; le.t = t;
+    lg.set(po.by, le);
+    rm.broadcast({ t: 'hit', id: q.id, by: po.by, dmg, hp: q.hp, blocked: false, skill: po.skill, tag: 'poison' });
+    if (q.hp <= 0) {
+      const killer = rm.players.get(po.by);
+      clearPoison(rm, q);
+      if (killer && killer !== q) kill(killer, q, { skill: po.skill }, 'poison');
+      else { kill(q, q, { skill: po.skill }, 'poison'); q.kills = Math.max(0, q.kills - 1); q.streak = 0; } // 중독시킨 사람이 나갔으면 자멸 (킬 없음)
+    } else if (po.left <= 0) clearPoison(rm, q);
+  }
+}
+function clearPoison(rm, q) {
+  if (!q.poison) return;
+  q.poison = null;
+  rm.broadcast({ t: 'poison', id: q.id, on: false });
 }
 
 // 투사체 발사: 시선 방향(위아래 포함)으로 날아가며, 사거리(flat)까지는 직선, 그 뒤로는 중력 포물선
@@ -540,7 +576,7 @@ function respawn(rm, id, force = false) {
   Object.assign(q, {
     x: s.x, y: s.y, z: s.z, yaw: s.yaw, pitch: 0, hp: CLASSES[q.cls].hp,
     alive: true, blocking: false, blockSince: 0, stunUntil: 0, buffUntil: 0, buffDmg: 1, buffSpeed: 1,
-    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), spawnGuard: now() + PLAYER.spawnGuardMs, stance: 0, dmgLog: new Map(),
+    counterUntil: 0, dashUntil: 0, cds: {}, spawnAt: now(), spawnGuard: now() + PLAYER.spawnGuardMs, stance: 0, dmgLog: new Map(), poison: null,
   });
   q.lastState = now();
   if (changed) rm.broadcast({ t: 'roster', list: rm.roster() });
@@ -615,7 +651,7 @@ function useSkill(p, slot) {
       reach, cos, skill: id, ranged: reach > 6, proj: def.proj, multi: id === 'volley',
       dmg: def.dmg ?? c.damage * def.dmgMult * dmgMult(p),
       ignoreBlock: !!def.ignoreBlock, knock: def.knock || 0, stun: def.stun || 0,
-      lifesteal: def.lifesteal || 0, selfHeal: def.selfHeal || 0,
+      lifesteal: def.lifesteal || 0, selfHeal: def.selfHeal || 0, poison: def.poison || null,
     });
   }, def.windup * 1000);
 }
@@ -1463,6 +1499,7 @@ wss.on('connection', (ws) => {
 
 /* ───────────── 주기 작업 ───────────── */
 setInterval(() => { for (const rm of rooms.values()) rm.stepProjs(0.025); }, 25);
+setInterval(() => { const t = now(); for (const rm of rooms.values()) if (rm.humans) stepPoison(rm, t); }, POISON_TICK_MS);
 setInterval(() => { for (const rm of rooms.values()) if (rm.humans && rm.botCount) rm.stepBots(0.05); }, 50); // AI 판단 (20Hz) // 투사체 비행 계산 (40Hz)
 
 setInterval(() => { // 20Hz 스냅샷
